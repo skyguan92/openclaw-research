@@ -19,6 +19,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 
 
+def _run_child(args: list[str]) -> int:
+    """运行子命令并透传退出码。"""
+    result = subprocess.run(args, cwd=str(ROOT))
+    return result.returncode
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -29,41 +35,27 @@ def main():
         print("  visualize  — 生成图表")
         print("  record     — 手动记录 benchmark 结果")
         print("  smoke      — 快速冒烟测试（验证环境可用）")
-        return
+        return 0
 
     cmd = sys.argv[1]
     rest = sys.argv[2:]
 
     if cmd == "swebench":
-        subprocess.run(
-            [sys.executable, "-m", "adapters.swebench_adapter"] + rest,
-            cwd=str(ROOT),
-        )
+        return _run_child([sys.executable, "-m", "adapters.swebench_adapter"] + rest)
     elif cmd == "memory":
-        subprocess.run(
-            [sys.executable, "-m", "adapters.memory_adapter"] + rest,
-            cwd=str(ROOT),
-        )
+        return _run_child([sys.executable, "-m", "adapters.memory_adapter"] + rest)
     elif cmd == "compare":
-        subprocess.run(
-            [sys.executable, "analysis/compare.py"] + rest,
-            cwd=str(ROOT),
-        )
+        return _run_child([sys.executable, "analysis/compare.py"] + rest)
     elif cmd == "visualize":
-        subprocess.run(
-            [sys.executable, "analysis/visualize.py"] + rest,
-            cwd=str(ROOT),
-        )
+        return _run_child([sys.executable, "analysis/visualize.py"] + rest)
     elif cmd == "record":
-        subprocess.run(
-            [sys.executable, "scripts/run_benchmark.py"] + rest,
-            cwd=str(ROOT),
-        )
+        return _run_child([sys.executable, "scripts/run_benchmark.py"] + rest)
     elif cmd == "smoke":
-        run_smoke_test()
+        return run_smoke_test()
     else:
         print(f"未知命令: {cmd}")
         print("运行 python run.py 查看帮助")
+        return 1
 
 
 def run_smoke_test():
@@ -71,6 +63,7 @@ def run_smoke_test():
     print("=" * 50)
     print("冒烟测试")
     print("=" * 50)
+    failures = 0
 
     # 1. API 连通性
     print("\n[1/4] 测试 Kimi API 连通性...")
@@ -83,10 +76,12 @@ def run_smoke_test():
         )
         if result.error:
             print(f"  FAIL: {result.error}")
+            failures += 1
         else:
             print(f"  OK — {result.tokens_total} tokens, {result.latency_s:.1f}s")
     except Exception as e:
         print(f"  FAIL: {e}")
+        failures += 1
 
     # 2. SWE-bench 数据集
     print("\n[2/4] 测试 SWE-bench 数据加载...")
@@ -103,6 +98,7 @@ def run_smoke_test():
     except Exception as e:
         print(f"  FAIL: {e}")
         print("  提示: pip install datasets")
+        failures += 1
 
     # 3. 分析脚本
     print("\n[3/4] 测试分析脚本...")
@@ -116,18 +112,23 @@ def run_smoke_test():
         print("  OK — compare.py --demo 正常")
     else:
         print(f"  FAIL: {r.stderr[:200]}")
+        failures += 1
 
     # 4. Docker (SWE-bench 评测需要)
     print("\n[4/4] 测试 Docker...")
-    r = subprocess.run(["docker", "info"], capture_output=True, text=True)
-    if r.returncode == 0:
-        print("  OK — Docker 可用")
-    else:
-        print("  WARN — Docker 不可用（SWE-bench 评测需要 Docker）")
+    try:
+        r = subprocess.run(["docker", "info"], capture_output=True, text=True)
+        if r.returncode == 0:
+            print("  OK — Docker 可用")
+        else:
+            print("  WARN — Docker 不可用（SWE-bench 评测需要 Docker）")
+    except FileNotFoundError:
+        print("  WARN — 未找到 Docker 命令（SWE-bench 评测需要 Docker）")
 
     print("\n" + "=" * 50)
     print("冒烟测试完成")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

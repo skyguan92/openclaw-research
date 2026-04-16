@@ -42,11 +42,12 @@ python run.py smoke
 # 3. 跑记忆快速测试（直接调 API，最快验证）
 python run.py memory --agent openclaw --quick-test
 
-# 4. 跑 SWE-bench（取 5 题试跑）
-python run.py swebench --agent openclaw --limit 5
+# 4. 跑真实 SWE-bench workspace case
+python run.py swebench --agent openclaw --mode workspace --instance-ids astropy__astropy-12907 --run-id pilot_astropy
 
 # 5. 查看结果
-python run.py compare
+python run.py swebench --evaluate swebench_output/openclaw.pilot_astropy.jsonl --run-id pilot_astropy
+python run.py compare --run-id pilot_astropy
 python run.py visualize --output results/
 ```
 
@@ -56,6 +57,10 @@ python run.py visualize --output results/
 |------|--------|
 | `python run.py smoke` | 冒烟测试（API + 数据集 + Docker） |
 | `python run.py swebench --agent NAME --limit N` | SWE-bench 评测 |
+| `python run.py swebench --agent openclaw --mode workspace ...` | OpenClaw 在真实 repo workspace 中改文件 |
+| `python run.py swebench --agent NAME --mode repo-mentioned ...` | 机器上有本地项目目录，但 agent 需要自己发现并进入 |
+| `python run.py swebench ... --timeout 0` | 不设 agent 超时，记录真实总耗时 |
+| `python run.py swebench ... --runtime-profile memory-enabled --rounds 5` | 隔离 state、清空开局 memory、连续观察第 1-5 轮表现 |
 | `python run.py swebench --evaluate FILE` | 评测已有预测文件 |
 | `python run.py memory --agent NAME --quick-test` | 快速记忆测试 |
 | `python run.py memory --agent NAME --generate-config` | 生成 MemoryAgentBench 配置 |
@@ -65,6 +70,18 @@ python run.py visualize --output results/
 | `python run.py record --agent NAME --task ID` | 手动记录结果 |
 
 `--agent` 可选: `openclaw`, `hermes`, `claude-code`, `all`
+
+## 研究级路径
+
+正式研究结果请优先使用 OpenClaw 的 `workspace` 模式，而不是 text-only patch 生成。
+
+- `workspace` 模式会为每个 SWE-bench instance materialize 一个本地 git 工作区，并从真实 `git diff` 导出 patch
+- 默认走 `native` 提问风格：只给一个接近真实用户提问的 issue 文本，不额外加行为约束或 hints
+- `repo-mentioned` 模式更接近裸用户提问：机器上已有一个本地项目目录，但 agent 不是从 repo 根目录起跑，只会在 prompt 里被告知“这台机器上有个项目文件夹叫 xxx”
+- `memory-enabled` runtime 协议会给每个 agent 和 task 分配隔离 state 目录：第 1 轮前清空 memory，后续轮次复用同一 state，但不会碰默认 `~/.openclaw` / `~/.hermes` / `~/.claude`
+- `claude-code` 在 Kimi 后端下会以 `--thinking disabled` 运行，避免 OpenAI shim 返回缺失 `reasoning_content` 时污染评测结果
+- token / tool trace 以 OpenClaw session telemetry 为准，结果会落到 `data/raw/`
+- 具体流程见 [protocols/research_protocol.md](protocols/research_protocol.md)
 
 ## Token 效率计量
 

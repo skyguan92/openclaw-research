@@ -19,6 +19,8 @@ from typing import Optional
 
 import requests
 
+from adapters.runtime_state import build_runtime_env
+
 # ── Kimi API 配置（三个 agent 共用同一 LLM）──────────────────────────
 
 KIMI_BASE_URL = os.getenv(
@@ -51,6 +53,39 @@ class AgentResult:
         return self.tokens_out / 1000
 
 
+def _extract_usage(data: dict) -> tuple[int, int, int]:
+    """从不同 API/CLI 返回结构中尽量提取 token 用量。"""
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        tokens_in = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+        tokens_out = usage.get("completion_tokens", usage.get("output_tokens", 0))
+        tokens_total = usage.get("total_tokens", (tokens_in or 0) + (tokens_out or 0))
+        return int(tokens_in or 0), int(tokens_out or 0), int(tokens_total or 0)
+
+    model_usage = data.get("modelUsage")
+    if isinstance(model_usage, dict):
+        usage_entry = model_usage.get(KIMI_MODEL)
+        if usage_entry is None and len(model_usage) == 1:
+            usage_entry = next(iter(model_usage.values()))
+        if isinstance(usage_entry, dict):
+            tokens_in = usage_entry.get("inputTokens", 0)
+            tokens_out = usage_entry.get("outputTokens", 0)
+            return int(tokens_in or 0), int(tokens_out or 0), int((tokens_in or 0) + (tokens_out or 0))
+
+    return 0, 0, 0
+
+
+def _extract_tool_calls(data: dict) -> int:
+    """从常见字段中提取工具调用次数。"""
+    if isinstance(data.get("tool_calls"), list):
+        return len(data["tool_calls"])
+    if isinstance(data.get("tool_calls_count"), int):
+        return max(0, data["tool_calls_count"])
+    if isinstance(data.get("num_turns"), int):
+        return max(0, data["num_turns"] - 1)
+    return 0
+
+
 # ── API 模式: 直接调用 Kimi API ──────────────────────────────────────
 
 
@@ -64,8 +99,12 @@ def call_kimi_api(
 ) -> AgentResult:
     """直接调用 Kimi OpenAI-compatible API，返回 AgentResult。"""
     t0 = time.time()
+    if not KIMI_API_KEY:
+        return AgentResult(error="KIMI_API_KEY is not set", latency_s=0.0)
     try:
-        resp = requests.post(
+        session = requests.Session()
+        session.trust_env = False
+        resp = session.post(
             f"{KIMI_BASE_URL}/chat/completions",
             headers={
                 "Content-Type": "application/json",
@@ -117,7 +156,12 @@ def _build_clean_env(extra: dict | None = None) -> dict:
 
 
 def _run_openclaw_cli(
-    prompt: str, *, cwd: str | None = None, timeout: int = 600
+    prompt: str,
+    *,
+    cwd: str | None = None,
+    timeout: int | None = 600,
+    runtime_state_dir: Path | None = None,
+    **_: object,
 ) -> AgentResult:
     """
     OpenClaw CLI 非交互模式。
@@ -132,7 +176,7 @@ def _run_openclaw_cli(
         "--prompt", prompt,
         "--json",
     ]
-    env = _build_clean_env()
+    env = _build_clean_env(build_runtime_env("openclaw", runtime_state_dir))
     t0 = time.time()
     try:
         result = subprocess.run(
@@ -159,16 +203,30 @@ def _run_openclaw_cli(
         outputs = data.get("outputs", [])
         if outputs:
             text = outputs[0].get("text", "")
-        return AgentResult(response=text, latency_s=latency, raw=data)
+        tokens_in, tokens_out, tokens_total = _extract_usage(data)
+        return AgentResult(
+            response=text,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            tokens_total=tokens_total,
+            tool_calls=_extract_tool_calls(data),
+            latency_s=latency,
+            raw=data,
+        )
 
     except subprocess.TimeoutExpired:
-        return AgentResult(error="timeout", latency_s=timeout)
+        return AgentResult(error="timeout", latency_s=time.time() - t0)
     except Exception as e:
         return AgentResult(error=str(e), latency_s=time.time() - t0)
 
 
 def _run_hermes_cli(
-    prompt: str, *, cwd: str | None = None, timeout: int = 600
+    prompt: str,
+    *,
+    cwd: str | None = None,
+    timeout: int | None = 600,
+    runtime_state_dir: Path | None = None,
+    **_: object,
 ) -> AgentResult:
     """
     Hermes Agent CLI 非交互模式。
@@ -179,7 +237,7 @@ def _run_hermes_cli(
     """
     hermes_bin = str(Path.home() / ".hermes/hermes-agent/.venv/bin/hermes")
     cmd = [hermes_bin, "chat", "-q", prompt, "-Q"]
-    env = _build_clean_env()
+    env = _build_clean_env(build_runtime_env("hermes", runtime_state_dir))
     t0 = time.time()
     try:
         result = subprocess.run(
@@ -217,13 +275,19 @@ def _run_hermes_cli(
         return AgentResult(response=response, latency_s=latency)
 
     except subprocess.TimeoutExpired:
-        return AgentResult(error="timeout", latency_s=timeout)
+        return AgentResult(error="timeout", latency_s=time.time() - t0)
     except Exception as e:
         return AgentResult(error=str(e), latency_s=time.time() - t0)
 
 
 def _run_openclaude_cli(
-    prompt: str, *, cwd: str | None = None, timeout: int = 300
+    prompt: str,
+    *,
+    cwd: str | None = None,
+    timeout: int | None = 300,
+    runtime_state_dir: Path | None = None,
+    runtime_memory_enabled: bool = False,
+    **_: object,
 ) -> AgentResult:
     """
     OpenClaude (Claude Code fork) CLI 非交互模式。
@@ -238,17 +302,21 @@ def _run_openclaude_cli(
         bun, cli,
         "--provider", "openai",
         "--model", KIMI_MODEL,
-        "--bare",
+        # Kimi's OpenAI-compatible endpoint does not reliably emit reasoning
+        # content in Claude Code's expected format, so adaptive thinking can
+        # fail with invalid_request_error during headless runs.
+        "--thinking", "disabled",
         "--dangerously-skip-permissions",
         "--output-format", "json",
-        "--system-prompt", "You are a helpful assistant. Answer concisely.",
-        "-p", prompt,
     ]
+    if not runtime_memory_enabled:
+        cmd.extend(["--bare", "--system-prompt", "You are a helpful assistant. Answer concisely."])
+    cmd.extend(["-p", prompt])
     env = _build_clean_env({
         "OPENAI_API_KEY": KIMI_API_KEY,
         "OPENAI_BASE_URL": KIMI_BASE_URL,
         "OPENAI_MODEL": KIMI_MODEL,
-        "CLAUDE_CONFIG_DIR": str(Path.home() / ".openclaude"),
+        **build_runtime_env("claude-code", runtime_state_dir),
     })
 
     t0 = time.time()
@@ -269,6 +337,13 @@ def _run_openclaude_cli(
         # 解析 JSON 输出
         data = json.loads(stdout)
         response = data.get("result", "")
+        subtype = str(data.get("subtype", ""))
+        errors = data.get("errors") if isinstance(data.get("errors"), list) else []
+        error_text = ""
+        if errors:
+            error_text = "; ".join(str(item) for item in errors if item)
+        elif response:
+            error_text = str(response)
         # 提取 token 用量
         model_usage = data.get("modelUsage", {})
         usage = model_usage.get(KIMI_MODEL, {})
@@ -276,6 +351,7 @@ def _run_openclaude_cli(
         tokens_out = usage.get("outputTokens", 0)
         duration_ms = data.get("duration_ms", 0)
         num_turns = data.get("num_turns", 0)
+        is_error = bool(data.get("is_error")) or subtype.startswith("error")
 
         return AgentResult(
             response=response,
@@ -284,6 +360,7 @@ def _run_openclaude_cli(
             tokens_total=tokens_in + tokens_out,
             tool_calls=max(0, num_turns - 1),  # first turn is the user message
             latency_s=duration_ms / 1000 if duration_ms else latency,
+            error=error_text if is_error else None,
             raw=data,
         )
     except json.JSONDecodeError:
@@ -292,7 +369,7 @@ def _run_openclaude_cli(
             latency_s=time.time() - t0,
         )
     except subprocess.TimeoutExpired:
-        return AgentResult(error="timeout", latency_s=timeout)
+        return AgentResult(error="timeout", latency_s=time.time() - t0)
     except Exception as e:
         return AgentResult(error=str(e), latency_s=time.time() - t0)
 
@@ -310,13 +387,14 @@ def run_agent_cli(
     prompt: str,
     *,
     cwd: str | None = None,
-    timeout: int = 600,
+    timeout: int | None = 600,
+    **kwargs,
 ) -> AgentResult:
     """通过 CLI 子进程调用 agent（路由到各 agent 专用函数）。"""
     runner = _CLI_RUNNERS.get(agent_name)
     if runner is None:
         return AgentResult(error=f"Unknown agent: {agent_name}")
-    return runner(prompt, cwd=cwd, timeout=timeout)
+    return runner(prompt, cwd=cwd, timeout=timeout, **kwargs)
 
 
 # ── 统一入口 ─────────────────────────────────────────────────────────

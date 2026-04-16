@@ -68,6 +68,7 @@ def _build_filler_messages(count: int) -> list[dict]:
 QUICK_MEMORY_TESTS = [
     {
         "id": "ar-1",
+        "task_id": "mem-01",
         "category": "accurate_retrieval",
         "description": "单轮事实召回",
         "setup_messages": [
@@ -87,6 +88,7 @@ QUICK_MEMORY_TESTS = [
     },
     {
         "id": "cr-1",
+        "task_id": "mem-03",
         "category": "conflict_resolution",
         "description": "矛盾信息检测",
         "setup_messages": [
@@ -100,6 +102,7 @@ QUICK_MEMORY_TESTS = [
     },
     {
         "id": "lru-1",
+        "task_id": "mem-04",
         "category": "long_range_understanding",
         "description": "长上下文信息利用",
         "setup_messages": [
@@ -153,7 +156,12 @@ def _flatten_messages_to_prompt(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def run_quick_test(agent_name: str, *, mode: str = "api") -> list[dict]:
+def run_quick_test(
+    agent_name: str,
+    *,
+    mode: str = "api",
+    run_group: str | None = None,
+) -> list[dict]:
     """
     运行快速记忆测试。
 
@@ -163,6 +171,7 @@ def run_quick_test(agent_name: str, *, mode: str = "api") -> list[dict]:
     from adapters.agent_runner import call_kimi_api, run_agent_cli
 
     results = []
+    run_group = run_group or time.strftime("%Y%m%d_%H%M%S")
     for test in QUICK_MEMORY_TESTS:
         print(f"  [{test['id']}] {test['description']} ({mode}) ...", end=" ", flush=True)
 
@@ -173,7 +182,10 @@ def run_quick_test(agent_name: str, *, mode: str = "api") -> list[dict]:
         if mode == "cli":
             # CLI 模式：将多轮对话扁平化为单条 prompt
             prompt = _flatten_messages_to_prompt(messages)
-            prompt += "\n\n请根据上述对话内容回答最后一个问题。"
+            if test.get("query"):
+                prompt += "\n\n请根据上述对话内容回答最后一个问题。"
+            else:
+                prompt += "\n\n请直接回应最后一句用户消息；如果你发现上下文中有信息冲突，请明确指出。"
             result = run_agent_cli(agent_name, prompt, timeout=120)
         else:
             result = call_kimi_api(messages, max_tokens=2048)
@@ -185,9 +197,11 @@ def run_quick_test(agent_name: str, *, mode: str = "api") -> list[dict]:
             scores = score_retrieval(result.response, test["expected_facts"])
 
         record = {
-            "run_id": f"mem_{test['id']}_{agent_name}_{int(time.time())}",
+            "run_id": f"mem_{test['id']}_{agent_name}_{run_group}",
+            "run_group": run_group,
             "agent": agent_name,
-            "task_id": test["id"],
+            "task_id": test["task_id"],
+            "benchmark_case_id": test["id"],
             "dimension": "memory",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "metrics": {
@@ -195,10 +209,13 @@ def run_quick_test(agent_name: str, *, mode: str = "api") -> list[dict]:
                 "tokens_in": result.tokens_in,
                 "tokens_out": result.tokens_out,
                 "tokens_total": result.tokens_total,
+                "tool_calls_count": result.tool_calls,
                 "latency_s": result.latency_s,
             },
-            "notes": test["description"],
+            "notes": f"{test['description']} (mode={mode})",
         }
+        if result.error:
+            record["error"] = result.error
         results.append(record)
 
         # 保存到 data/raw/
@@ -206,7 +223,10 @@ def run_quick_test(agent_name: str, *, mode: str = "api") -> list[dict]:
         with open(RESULTS_DIR / f"{record['run_id']}.json", "w") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
 
-        status = "ok" if scores.get("recall_accuracy", 0) > 0.5 or scores.get("detected") else "fail"
+        if result.error:
+            status = f"error: {result.error}"
+        else:
+            status = "ok" if scores.get("recall_accuracy", 0) > 0.5 or scores.get("detected") else "fail"
         print(f"{status} {scores}")
 
     return results
@@ -231,6 +251,11 @@ def main():
         default="cli",
         help="测试模式: api=直接调 API, cli=通过 agent CLI（默认 cli）",
     )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="本次测试的 run group，用于把同一批结果归到一起",
+    )
     args = parser.parse_args()
 
     agents_to_run = AGENTS if args.agent == "all" else [args.agent]
@@ -247,11 +272,12 @@ def main():
         return
 
     if args.quick_test:
+        run_group = args.run_id or time.strftime("%Y%m%d_%H%M%S")
         for agent in agents_to_run:
             print(f"\n{'='*50}")
-            print(f"Agent: {agent} (mode={args.mode})")
+            print(f"Agent: {agent} (mode={args.mode}, run_id={run_group})")
             print(f"{'='*50}")
-            run_quick_test(agent, mode=args.mode)
+            run_quick_test(agent, mode=args.mode, run_group=run_group)
         return
 
     parser.print_help()

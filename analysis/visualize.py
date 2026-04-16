@@ -19,7 +19,7 @@ import seaborn as sns
 matplotlib.rcParams["font.sans-serif"] = ["PingFang SC", "Heiti SC", "Arial Unicode MS", "DejaVu Sans"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-from compare import AGENTS, load_data, flatten_metrics
+from compare import AGENTS, load_data, filter_records, flatten_metrics
 
 COLORS = {"openclaw": "#4CAF50", "hermes": "#FF9800", "claude-code": "#2196F3"}
 
@@ -114,8 +114,10 @@ def plot_success_heatmap(df, output_dir: Path) -> None:
         row = []
         for tid in task_ids:
             data = suc[(suc["agent"] == agent) & (suc["task_id"] == tid)]
-            if not data.empty and "quality_score" in data:
+            if not data.empty and "quality_score" in data and data["quality_score"].notna().any():
                 row.append(data["quality_score"].mean())
+            elif not data.empty and "result" in data:
+                row.append((data["result"] == "pass").mean() * 5)
             else:
                 row.append(0)
         matrix.append(row)
@@ -144,12 +146,15 @@ def main():
     parser = argparse.ArgumentParser(description="OpenClaw Research - 可视化")
     parser.add_argument("--demo", action="store_true", help="使用内置 sample data")
     parser.add_argument("--output", type=str, default="results", help="输出目录")
+    parser.add_argument("--run-id", default=None, help="只可视化指定 run group / run_id 子串")
+    parser.add_argument("--agent", choices=AGENTS + ["all"], default="all", help="只可视化指定 agent")
     args = parser.parse_args()
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     records = load_data(use_demo=args.demo)
+    records = filter_records(records, run_group=args.run_id, agent=args.agent)
     if not records:
         print("未找到数据。使用 --demo 查看演示。")
         return
