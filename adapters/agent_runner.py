@@ -106,29 +106,205 @@ def call_kimi_api(
 
 # ── CLI 模式: 通过子进程调用 agent ───────────────────────────────────
 
-AGENT_CLI = {
-    "openclaw": {
-        "cmd": ["openclaw"],
-        "env_extra": {},
-    },
-    "hermes": {
-        "cmd": [str(Path.home() / ".hermes/hermes-agent/.venv/bin/hermes")],
-        "env_extra": {},
-    },
-    "claude-code": {
-        "cmd": [
-            str(Path.home() / ".bun/bin/bun"),
-            str(Path.home() / "projects/openclaude/dist/cli.mjs"),
-        ],
-        "env_extra": {
-            "CLAUDE_CONFIG_DIR": str(Path.home() / ".openclaude"),
-            "CLAUDE_CODE_USE_OPENAI": "1",
-            "OPENAI_BASE_URL": KIMI_BASE_URL,
-            "OPENAI_API_KEY": KIMI_API_KEY,
-            "OPENAI_MODEL": KIMI_MODEL,
-            "ANTHROPIC_CUSTOM_HEADERS": "User-Agent: claude-code/2.1.5",
-        },
-    },
+def _build_clean_env(extra: dict | None = None) -> dict:
+    """构建干净环境：继承系统 env，移除代理，合并额外变量。"""
+    env = dict(os.environ)
+    # Kimi 不走代理
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        env.pop(key, None)
+    # 移除可能干扰 OpenClaude 的 USER_TYPE=ant
+    env.pop("USER_TYPE", None)
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _run_openclaw_cli(
+    prompt: str, *, cwd: str | None = None, timeout: int = 600
+) -> AgentResult:
+    """
+    OpenClaw CLI 非交互模式。
+
+    命令: openclaw infer model run --local --model kimi/kimi-for-coding --prompt "..." --json
+    输出: JSON { ok, outputs: [{ text }], ... }
+    """
+    cmd = [
+        "openclaw", "infer", "model", "run",
+        "--local",
+        "--model", f"kimi/{KIMI_MODEL}",
+        "--prompt", prompt,
+        "--json",
+    ]
+    env = _build_clean_env()
+    t0 = time.time()
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env,
+        )
+        latency = time.time() - t0
+
+        if result.returncode != 0:
+            return AgentResult(error=result.stderr.strip(), latency_s=latency)
+
+        # stdout 是干净 JSON（stderr 已分离），直接解析
+        stdout = result.stdout.strip()
+        if not stdout:
+            return AgentResult(
+                error=result.stderr.strip() or "empty output",
+                latency_s=latency,
+            )
+        # 找到 JSON 起始（跳过可能的非 JSON 前缀行）
+        json_start = stdout.find("{")
+        if json_start < 0:
+            return AgentResult(response=stdout, latency_s=latency)
+        data = json.loads(stdout[json_start:])
+        text = ""
+        outputs = data.get("outputs", [])
+        if outputs:
+            text = outputs[0].get("text", "")
+        return AgentResult(response=text, latency_s=latency, raw=data)
+
+    except subprocess.TimeoutExpired:
+        return AgentResult(error="timeout", latency_s=timeout)
+    except Exception as e:
+        return AgentResult(error=str(e), latency_s=time.time() - t0)
+
+
+def _run_hermes_cli(
+    prompt: str, *, cwd: str | None = None, timeout: int = 600
+) -> AgentResult:
+    """
+    Hermes Agent CLI 非交互模式。
+
+    命令: hermes chat -q "..." -Q
+    -q: 单条消息   -Q: quiet 模式（只输出 AI 回复）
+    config.yaml 中 provider: custom:kimi 指向 api.kimi.com
+    """
+    hermes_bin = str(Path.home() / ".hermes/hermes-agent/.venv/bin/hermes")
+    cmd = [hermes_bin, "chat", "-q", prompt, "-Q"]
+    env = _build_clean_env()
+    t0 = time.time()
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env,
+        )
+        latency = time.time() - t0
+
+        # Hermes -Q 模式输出纯文本回复（可能有 rich formatting 残留，清理一下）
+        stdout = result.stdout.strip()
+        # 去掉 Hermes 的 rich box 装饰
+        lines = []
+        for line in stdout.splitlines():
+            stripped = line.strip()
+            # 跳过 box 装饰行和初始化行
+            if stripped.startswith("╭") or stripped.startswith("╰") or stripped.startswith("│"):
+                # 提取 box 内容
+                if stripped.startswith("│"):
+                    content = stripped.strip("│ ").strip()
+                    if content:
+                        lines.append(content)
+            elif stripped.startswith(("🤖", "🔗", "🔑", "✅", "⚠️", "📊", "🛠️")):
+                # 跳过初始化状态行
+                continue
+            elif stripped.startswith("[thinking]"):
+                continue
+            elif stripped.startswith("session_id:"):
+                continue
+            elif stripped:
+                lines.append(stripped)
+        response = "\n".join(lines).strip()
+
+        if result.returncode != 0 and not response:
+            return AgentResult(error=result.stderr.strip(), latency_s=latency)
+
+        return AgentResult(response=response, latency_s=latency)
+
+    except subprocess.TimeoutExpired:
+        return AgentResult(error="timeout", latency_s=timeout)
+    except Exception as e:
+        return AgentResult(error=str(e), latency_s=time.time() - t0)
+
+
+def _run_openclaude_cli(
+    prompt: str, *, cwd: str | None = None, timeout: int = 300
+) -> AgentResult:
+    """
+    OpenClaude (Claude Code fork) CLI 非交互模式。
+
+    命令: bun cli.mjs --provider openai --model kimi-for-coding --bare
+           --dangerously-skip-permissions --output-format json -p "..."
+    输出: JSON { result, duration_ms, modelUsage: { model: { inputTokens, outputTokens } } }
+    """
+    bun = str(Path.home() / ".bun/bin/bun")
+    cli = str(Path.home() / "projects/openclaude/dist/cli.mjs")
+    cmd = [
+        bun, cli,
+        "--provider", "openai",
+        "--model", KIMI_MODEL,
+        "--bare",
+        "--dangerously-skip-permissions",
+        "--output-format", "json",
+        "--system-prompt", "You are a helpful assistant. Answer concisely.",
+        "-p", prompt,
+    ]
+    env = _build_clean_env({
+        "OPENAI_API_KEY": KIMI_API_KEY,
+        "OPENAI_BASE_URL": KIMI_BASE_URL,
+        "OPENAI_MODEL": KIMI_MODEL,
+        "CLAUDE_CONFIG_DIR": str(Path.home() / ".openclaude"),
+    })
+
+    t0 = time.time()
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env,
+        )
+        latency = time.time() - t0
+
+        stdout = result.stdout.strip()
+        if not stdout:
+            stderr = result.stderr.strip()
+            return AgentResult(
+                error=stderr or "empty output (possible silent crash)",
+                latency_s=latency,
+            )
+
+        # 解析 JSON 输出
+        data = json.loads(stdout)
+        response = data.get("result", "")
+        # 提取 token 用量
+        model_usage = data.get("modelUsage", {})
+        usage = model_usage.get(KIMI_MODEL, {})
+        tokens_in = usage.get("inputTokens", 0)
+        tokens_out = usage.get("outputTokens", 0)
+        duration_ms = data.get("duration_ms", 0)
+        num_turns = data.get("num_turns", 0)
+
+        return AgentResult(
+            response=response,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            tokens_total=tokens_in + tokens_out,
+            tool_calls=max(0, num_turns - 1),  # first turn is the user message
+            latency_s=duration_ms / 1000 if duration_ms else latency,
+            raw=data,
+        )
+    except json.JSONDecodeError:
+        return AgentResult(
+            response=result.stdout.strip(),
+            latency_s=time.time() - t0,
+        )
+    except subprocess.TimeoutExpired:
+        return AgentResult(error="timeout", latency_s=timeout)
+    except Exception as e:
+        return AgentResult(error=str(e), latency_s=time.time() - t0)
+
+
+# 路由表
+_CLI_RUNNERS = {
+    "openclaw": _run_openclaw_cli,
+    "hermes": _run_hermes_cli,
+    "claude-code": _run_openclaude_cli,
 }
 
 
@@ -136,47 +312,14 @@ def run_agent_cli(
     agent_name: str,
     prompt: str,
     *,
-    cwd: Optional[str] = None,
+    cwd: str | None = None,
     timeout: int = 600,
 ) -> AgentResult:
-    """
-    通过 CLI 子进程调用 agent。
-
-    注意: 这是非交互模式，适用于支持 stdin/pipe 输入的 agent。
-    对于需要交互式终端的场景，请用 call_kimi_api() 代替。
-    """
-    if agent_name not in AGENT_CLI:
+    """通过 CLI 子进程调用 agent（路由到各 agent 专用函数）。"""
+    runner = _CLI_RUNNERS.get(agent_name)
+    if runner is None:
         return AgentResult(error=f"Unknown agent: {agent_name}")
-
-    config = AGENT_CLI[agent_name]
-    env = {**os.environ, **config["env_extra"]}
-    # Kimi 不走代理
-    env.pop("HTTP_PROXY", None)
-    env.pop("HTTPS_PROXY", None)
-    env.pop("http_proxy", None)
-    env.pop("https_proxy", None)
-
-    cmd = config["cmd"] + ["--print", "-p", prompt]
-
-    t0 = time.time()
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=env,
-        )
-        return AgentResult(
-            response=result.stdout,
-            latency_s=time.time() - t0,
-            error=result.stderr if result.returncode != 0 else None,
-        )
-    except subprocess.TimeoutExpired:
-        return AgentResult(error="timeout", latency_s=timeout)
-    except Exception as e:
-        return AgentResult(error=str(e), latency_s=time.time() - t0)
+    return runner(prompt, cwd=cwd, timeout=timeout)
 
 
 # ── 统一入口 ─────────────────────────────────────────────────────────

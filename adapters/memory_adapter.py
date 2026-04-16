@@ -140,19 +140,43 @@ def score_contradiction(response: str, contradicting_facts: list[str]) -> dict:
     }
 
 
-def run_quick_test(agent_name: str) -> list[dict]:
-    """运行快速记忆测试。"""
-    from adapters.agent_runner import call_kimi_api
+def _flatten_messages_to_prompt(messages: list[dict]) -> str:
+    """将多轮对话扁平化为单条 prompt（用于 CLI 模式）。"""
+    parts = []
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "user":
+            parts.append(f"[User]: {content}")
+        elif role == "assistant":
+            parts.append(f"[Assistant]: {content}")
+    return "\n".join(parts)
+
+
+def run_quick_test(agent_name: str, *, mode: str = "api") -> list[dict]:
+    """
+    运行快速记忆测试。
+
+    mode="api" → 直接调用 Kimi API（绕过 agent 框架，用于验证 baseline）
+    mode="cli" → 通过 agent CLI 调用（测试 agent 框架的实际表现）
+    """
+    from adapters.agent_runner import call_kimi_api, run_agent_cli
 
     results = []
     for test in QUICK_MEMORY_TESTS:
-        print(f"  [{test['id']}] {test['description']} ...", end=" ", flush=True)
+        print(f"  [{test['id']}] {test['description']} ({mode}) ...", end=" ", flush=True)
 
         messages = list(test["setup_messages"])
         if test.get("query"):
             messages.append({"role": "user", "content": test["query"]})
 
-        result = call_kimi_api(messages, max_tokens=2048)
+        if mode == "cli":
+            # CLI 模式：将多轮对话扁平化为单条 prompt
+            prompt = _flatten_messages_to_prompt(messages)
+            prompt += "\n\n请根据上述对话内容回答最后一个问题。"
+            result = run_agent_cli(agent_name, prompt, timeout=120)
+        else:
+            result = call_kimi_api(messages, max_tokens=2048)
 
         # 评分
         if test["category"] == "conflict_resolution":
@@ -201,6 +225,12 @@ def main():
         action="store_true",
         help="运行快速记忆测试（不依赖 MemoryAgentBench 完整环境）",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["api", "cli"],
+        default="cli",
+        help="测试模式: api=直接调 API, cli=通过 agent CLI（默认 cli）",
+    )
     args = parser.parse_args()
 
     agents_to_run = AGENTS if args.agent == "all" else [args.agent]
@@ -219,9 +249,9 @@ def main():
     if args.quick_test:
         for agent in agents_to_run:
             print(f"\n{'='*50}")
-            print(f"Agent: {agent}")
+            print(f"Agent: {agent} (mode={args.mode})")
             print(f"{'='*50}")
-            run_quick_test(agent)
+            run_quick_test(agent, mode=args.mode)
         return
 
     parser.print_help()
