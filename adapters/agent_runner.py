@@ -369,8 +369,8 @@ def _run_hermes_cli(
                 # 提取 box 内容
                 if stripped.startswith("│"):
                     content = stripped.strip("│ ").strip()
-                if content:
-                    lines.append(content)
+                    if content:
+                        lines.append(content)
             elif stripped.startswith(("🤖", "🔗", "🔑", "✅", "⚠️", "📊", "🛠️")):
                 # 跳过初始化状态行
                 continue
