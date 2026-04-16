@@ -11,6 +11,7 @@
 
 import json
 import os
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -84,6 +85,104 @@ def _extract_tool_calls(data: dict) -> int:
     if isinstance(data.get("num_turns"), int):
         return max(0, data["num_turns"] - 1)
     return 0
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _read_hermes_usage(
+    runtime_state_dir: Path | None,
+    *,
+    started_at: float,
+    finished_at: float,
+) -> dict:
+    """从隔离 HERMES_HOME/state.db 回填本次 CLI 运行的 token/tool telemetry。"""
+    if runtime_state_dir is None:
+        return {}
+
+    db_path = runtime_state_dir / "state.db"
+    if not db_path.exists():
+        return {}
+
+    lower = max(0.0, started_at - 2.0)
+    upper = finished_at + 5.0
+    query = """
+        SELECT
+            id,
+            parent_session_id,
+            started_at,
+            ended_at,
+            tool_call_count,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+            estimated_cost_usd
+        FROM sessions
+        WHERE source = 'cli'
+          AND started_at >= ?
+          AND started_at <= ?
+        ORDER BY started_at ASC
+    """
+
+    rows: list[dict] = []
+    last_error = ""
+    for _ in range(5):
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(
+                f"file:{db_path}?mode=ro",
+                uri=True,
+                timeout=1.0,
+            )
+            conn.row_factory = sqlite3.Row
+            rows = [dict(row) for row in conn.execute(query, (lower, upper)).fetchall()]
+            break
+        except sqlite3.Error as exc:
+            last_error = str(exc)
+            time.sleep(0.2)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    if not rows:
+        return {"query_error": last_error} if last_error else {}
+
+    totals = {
+        "tool_call_count": sum(_safe_int(row.get("tool_call_count")) for row in rows),
+        "input_tokens": sum(_safe_int(row.get("input_tokens")) for row in rows),
+        "output_tokens": sum(_safe_int(row.get("output_tokens")) for row in rows),
+        "cache_read_tokens": sum(_safe_int(row.get("cache_read_tokens")) for row in rows),
+        "cache_write_tokens": sum(_safe_int(row.get("cache_write_tokens")) for row in rows),
+        "reasoning_tokens": sum(_safe_int(row.get("reasoning_tokens")) for row in rows),
+    }
+    provider_total = totals["input_tokens"] + totals["output_tokens"]
+    runtime_total = (
+        provider_total
+        + totals["cache_read_tokens"]
+        + totals["cache_write_tokens"]
+        + totals["reasoning_tokens"]
+    )
+
+    return {
+        "tokens_in": totals["input_tokens"],
+        "tokens_out": totals["output_tokens"],
+        "tokens_total": runtime_total or provider_total,
+        "tool_calls": totals["tool_call_count"],
+        "usage_details": {
+            **totals,
+            "provider_tokens_total": provider_total,
+            "runtime_tokens_total": runtime_total or provider_total,
+            "session_count": len(rows),
+            "telemetry_source": "hermes_state_db",
+        },
+        "session_ids": [str(row.get("id", "")) for row in rows if row.get("id")],
+    }
 
 
 # ── API 模式: 直接调用 Kimi API ──────────────────────────────────────
@@ -238,12 +337,26 @@ def _run_hermes_cli(
     hermes_bin = str(Path.home() / ".hermes/hermes-agent/.venv/bin/hermes")
     cmd = [hermes_bin, "chat", "-q", prompt, "-Q"]
     env = _build_clean_env(build_runtime_env("hermes", runtime_state_dir))
+
+    def _usage_raw(usage: dict) -> dict:
+        raw: dict = {}
+        usage_details = usage.get("usage_details")
+        if isinstance(usage_details, dict):
+            raw["usage_details"] = usage_details
+        session_ids = usage.get("session_ids")
+        if isinstance(session_ids, list) and session_ids:
+            raw["session_ids"] = session_ids
+        if usage.get("query_error"):
+            raw["usage_query_error"] = usage["query_error"]
+        return raw
+
     t0 = time.time()
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env,
         )
         latency = time.time() - t0
+        usage = _read_hermes_usage(runtime_state_dir, started_at=t0, finished_at=t0 + latency)
 
         # Hermes -Q 模式输出纯文本回复（可能有 rich formatting 残留，清理一下）
         stdout = result.stdout.strip()
@@ -256,8 +369,8 @@ def _run_hermes_cli(
                 # 提取 box 内容
                 if stripped.startswith("│"):
                     content = stripped.strip("│ ").strip()
-                    if content:
-                        lines.append(content)
+                if content:
+                    lines.append(content)
             elif stripped.startswith(("🤖", "🔗", "🔑", "✅", "⚠️", "📊", "🛠️")):
                 # 跳过初始化状态行
                 continue
@@ -268,14 +381,33 @@ def _run_hermes_cli(
             elif stripped:
                 lines.append(stripped)
         response = "\n".join(lines).strip()
+        raw = _usage_raw(usage)
 
         if result.returncode != 0 and not response:
-            return AgentResult(error=result.stderr.strip(), latency_s=latency)
+            return AgentResult(error=result.stderr.strip(), latency_s=latency, raw=raw)
 
-        return AgentResult(response=response, latency_s=latency)
+        return AgentResult(
+            response=response,
+            tokens_in=_safe_int(usage.get("tokens_in")),
+            tokens_out=_safe_int(usage.get("tokens_out")),
+            tokens_total=_safe_int(usage.get("tokens_total")),
+            tool_calls=_safe_int(usage.get("tool_calls")),
+            latency_s=latency,
+            raw=raw,
+        )
 
     except subprocess.TimeoutExpired:
-        return AgentResult(error="timeout", latency_s=time.time() - t0)
+        latency = time.time() - t0
+        usage = _read_hermes_usage(runtime_state_dir, started_at=t0, finished_at=t0 + latency)
+        return AgentResult(
+            error="timeout",
+            tokens_in=_safe_int(usage.get("tokens_in")),
+            tokens_out=_safe_int(usage.get("tokens_out")),
+            tokens_total=_safe_int(usage.get("tokens_total")),
+            tool_calls=_safe_int(usage.get("tool_calls")),
+            latency_s=latency,
+            raw=_usage_raw(usage),
+        )
     except Exception as e:
         return AgentResult(error=str(e), latency_s=time.time() - t0)
 

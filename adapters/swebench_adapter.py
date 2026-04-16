@@ -276,6 +276,12 @@ def run_agent_on_instance(
     token_record["runtime_profile"] = runtime_profile
     if result.error:
         token_record["error"] = result.error
+    usage_details = result.raw.get("usage_details")
+    if isinstance(usage_details, dict):
+        token_record["usage_details"] = usage_details
+    session_ids = result.raw.get("session_ids")
+    if isinstance(session_ids, list) and session_ids:
+        token_record["session_ids"] = session_ids
     if mode in {"workspace", "repo-mentioned"}:
         token_record["notes"] += f", workspace={result.raw.get('workspace', '')}"
         if result.raw.get("session_id"):
