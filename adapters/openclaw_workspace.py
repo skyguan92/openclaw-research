@@ -229,11 +229,12 @@ def materialize_repo_mentioned_workspace(
     instance: dict,
     *,
     run_group: str,
+    workspace_namespace: str | None = None,
     workspace_root: Path = DEFAULT_REPO_MENTIONED_ROOT,
     repo_cache_dir: Path = DEFAULT_REPO_CACHE_DIR,
 ) -> Path:
     """为 repo-mentioned 模式创建工作区，并放一个同名本地项目目录。"""
-    workspace = workspace_root / run_group / instance["instance_id"]
+    workspace = workspace_root / (workspace_namespace or run_group) / instance["instance_id"]
     if workspace.exists():
         shutil.rmtree(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -650,6 +651,7 @@ def run_openclaw_repo_mentioned(
     workspace = materialize_repo_mentioned_workspace(
         instance,
         run_group=workspace_group,
+        workspace_namespace=f"{workspace_group}__openclaw",
         workspace_root=workspace_root,
         repo_cache_dir=repo_cache_dir,
     )

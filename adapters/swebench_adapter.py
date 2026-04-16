@@ -222,6 +222,7 @@ def run_agent_on_instance(
             workspace = materialize_repo_mentioned_workspace(
                 instance,
                 run_group=run_group,
+                workspace_namespace=f"{run_group}__{agent_name}",
                 workspace_root=repo_mentioned_root,
                 repo_cache_dir=repo_cache_dir,
             )
