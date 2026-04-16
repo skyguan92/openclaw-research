@@ -1,0 +1,205 @@
+# OpenClaw Research - Unified Task Registry
+# 三个 agent 系统使用同一套任务定义进行测试
+# Agents: openclaw, hermes, claude-code
+
+agents:
+  - id: openclaw
+    name: OpenClaw
+    version: "2026.3.22+"
+  - id: hermes
+    name: Nous Hermes Agent
+    version: TBD
+  - id: claude-code
+    name: Claude Code
+    version: TBD
+
+# ─────────────────────────────────────────────
+# Dimension 1: 记忆架构 (Memory Architecture)
+# ─────────────────────────────────────────────
+memory_tasks:
+  - id: mem-01
+    name: 单轮事实召回
+    difficulty: easy
+    description: |
+      在对话开头告知 agent 5 个事实（姓名、项目名、技术栈、截止日期、负责人），
+      经过 10 轮无关对话后，要求 agent 回忆全部 5 个事实。
+    metrics:
+      - recall_accuracy    # 5 个事实中正确回忆的比例
+      - hallucination_count  # 编造了不存在的事实数量
+
+  - id: mem-02
+    name: 跨会话记忆持久化
+    difficulty: medium
+    description: |
+      Session A: 告知 agent 一个技术决策（如"我们选择 PostgreSQL 而不是 MongoDB"）。
+      关闭会话。Session B: 新会话中询问 agent 之前的数据库选型决策。
+    metrics:
+      - persisted           # bool: 是否记住了
+      - accuracy            # 回忆的准确度 0-1
+      - latency_to_recall   # 需要几轮提示才想起来
+
+  - id: mem-03
+    name: 矛盾信息检测
+    difficulty: hard
+    description: |
+      先告知 agent "部署目标是 AWS"，后续对话中说"我们用的是 GCP"。
+      观察 agent 是否主动指出矛盾。
+    metrics:
+      - detected            # bool: 是否检测到矛盾
+      - proactive           # bool: 是否主动提出（vs 被问到才回答）
+      - resolution_quality  # 解决矛盾的处理质量 1-5
+
+  - id: mem-04
+    name: 长上下文窗口利用
+    difficulty: hard
+    description: |
+      在一个超长对话中（>50 轮），在第 5 轮埋入关键信息，
+      在第 45 轮要求 agent 引用该信息做决策。
+    metrics:
+      - recall_accuracy
+      - context_window_usage  # 估算实际使用的上下文比例
+
+  - id: mem-05
+    name: 结构化知识组织
+    difficulty: medium
+    description: |
+      给 agent 一个包含 10+ 文件的小项目，要求其理解并总结架构。
+      隔天在新会话中询问项目架构细节。
+    metrics:
+      - summary_quality     # 1-5
+      - persistence_method  # 使用了什么持久化机制（文件、向量、无）
+      - retrieval_accuracy  # 新会话中的回忆准确度 0-1
+
+# ─────────────────────────────────────────────
+# Dimension 2: Token 效率 (Token Efficiency)
+# ─────────────────────────────────────────────
+token_tasks:
+  - id: tok-01
+    name: 简单函数生成
+    difficulty: easy
+    description: |
+      要求生成一个 Python 函数：给定一个 list[dict]，按指定字段排序并去重。
+      统计从请求到完成的总 token 消耗。
+    expected_output: 可运行的 Python 函数，通过预定义测试用例
+    metrics:
+      - tokens_in
+      - tokens_out
+      - tokens_total
+      - task_completed     # bool
+
+  - id: tok-02
+    name: 多文件 Bug 修复
+    difficulty: medium
+    description: |
+      提供一个有 3 个文件的小项目，其中有一个跨文件的 import 错误。
+      要求 agent 定位并修复 bug。
+    expected_output: 修复后项目可正常运行
+    metrics:
+      - tokens_in
+      - tokens_out
+      - tokens_total
+      - files_read         # agent 读取了多少文件
+      - unnecessary_reads  # 读了但没用到的文件数
+
+  - id: tok-03
+    name: 重复任务效率
+    difficulty: medium
+    description: |
+      连续给 agent 5 个相似但不同的任务（如为 5 个不同 model 写 CRUD）。
+      对比第 1 次和第 5 次的 token 消耗，观察是否有学习效应。
+    metrics:
+      - tokens_per_task     # list[int], 每次的 token 数
+      - efficiency_trend    # 趋势：improving / stable / degrading
+
+  - id: tok-04
+    name: 大文件编辑精准度
+    difficulty: hard
+    description: |
+      给一个 500+ 行的文件，要求只修改其中 3 行。
+      观察 agent 是否只读取/输出必要部分，还是重写整个文件。
+    metrics:
+      - tokens_total
+      - edit_precision      # 修改行数 / 总输出行数
+      - correct             # bool: 修改是否正确
+
+  - id: tok-05
+    name: 工具调用效率
+    difficulty: medium
+    description: |
+      给一个需要用 grep + read + edit 三步完成的任务。
+      统计 agent 的工具调用次数和每次调用的 token 开销。
+    metrics:
+      - tool_calls_count
+      - tokens_per_tool_call
+      - redundant_calls     # 重复或无效的工具调用数
+
+# ─────────────────────────────────────────────
+# Dimension 3: 任务执行成功率 (Task Success Rate)
+# ─────────────────────────────────────────────
+success_tasks:
+  - id: suc-01
+    name: 绿地项目搭建
+    difficulty: medium
+    description: |
+      从零开始搭建一个 FastAPI + SQLAlchemy 项目，要求包含：
+      用户注册 API、数据库 migration、基本测试。
+    pass_criteria:
+      - 项目可以 pip install 并启动
+      - API 端点可正常调用
+      - 测试可通过
+
+  - id: suc-02
+    name: 已有项目 Feature 添加
+    difficulty: medium
+    description: |
+      在一个已有的 Express.js 项目中添加一个新的 REST endpoint，
+      包括路由、controller、测试。
+    pass_criteria:
+      - 新 endpoint 可正常响应
+      - 不破坏已有功能（已有测试仍通过）
+      - 代码风格与项目一致
+
+  - id: suc-03
+    name: 跨语言调试
+    difficulty: hard
+    description: |
+      一个 Python 后端 + TypeScript 前端的项目有一个 bug：
+      前端发送的 date 格式与后端解析不匹配。
+      要求 agent 定位并修复。
+    pass_criteria:
+      - 正确识别 bug 根因
+      - 修复后端到端可运行
+      - 修复方案合理（不是 workaround）
+
+  - id: suc-04
+    name: 配置与部署
+    difficulty: medium
+    description: |
+      要求 agent 为一个 Node.js 项目编写 Dockerfile 和 docker-compose.yaml，
+      包含应用、数据库、Redis。
+    pass_criteria:
+      - docker-compose up 可正常启动所有服务
+      - 应用可连接数据库和 Redis
+      - 无安全问题（不以 root 运行、无硬编码密码）
+
+  - id: suc-05
+    name: 代码重构
+    difficulty: hard
+    description: |
+      给一个有明显 code smell 的 300 行函数，要求拆分重构。
+      重构后功能不变，测试仍通过。
+    pass_criteria:
+      - 所有已有测试通过
+      - 函数被合理拆分（单一职责）
+      - 没有引入新 bug
+
+  - id: suc-06
+    name: 自主错误恢复
+    difficulty: hard
+    description: |
+      给 agent 一个会在第一次尝试时失败的任务（如依赖未安装）。
+      观察 agent 能否自主诊断错误并恢复执行。
+    pass_criteria:
+      - 识别错误原因
+      - 自主安装缺失依赖或修复环境
+      - 最终完成任务

@@ -1,0 +1,22 @@
+[project]
+name = "openclaw-research"
+version = "0.1.0"
+description = "Benchmark comparison of OpenClaw, Nous Hermes, and Claude Code across memory, token efficiency, and task success"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "seaborn>=0.13",
+    "pyyaml>=6.0",
+    "jupyter>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

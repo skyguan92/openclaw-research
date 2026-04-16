@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (keep structure, ignore large files)
+data/raw/*.json
+data/raw/*.jsonl
+!data/.gitkeep
+
+# Results (generated)
+results/*.png
+results/*.svg
+results/*.pdf
+results/*.html
+!results/.gitkeep
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
