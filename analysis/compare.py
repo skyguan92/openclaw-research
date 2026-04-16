@@ -87,9 +87,14 @@ def summarize_memory(df: pd.DataFrame) -> None:
         agent_data = mem[mem["agent"] == agent]
         if agent_data.empty:
             continue
-        recall = agent_data["recall_accuracy"].mean() if "recall_accuracy" in agent_data else "N/A"
-        halluc = agent_data["hallucination_count"].mean() if "hallucination_count" in agent_data else "N/A"
-        print(f"  {agent:15s}  recall_accuracy={recall:.2f}  hallucinations={halluc:.1f}")
+        recall = agent_data["recall_accuracy"].mean() if "recall_accuracy" in agent_data.columns and agent_data["recall_accuracy"].notna().any() else None
+        halluc = agent_data["hallucination_count"].mean() if "hallucination_count" in agent_data.columns and agent_data["hallucination_count"].notna().any() else None
+        parts = [f"  {agent:15s}"]
+        if recall is not None:
+            parts.append(f"recall_accuracy={recall:.2f}")
+        if halluc is not None:
+            parts.append(f"hallucinations={halluc:.1f}")
+        print("  ".join(parts))
 
 
 def summarize_tokens(df: pd.DataFrame) -> None:
