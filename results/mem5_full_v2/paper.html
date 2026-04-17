@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>三路 Coding Agent Runtime 在 SWE-bench Verified 上的 Token 结构与 Memory 行为对比</title>
+<style>
+/* ---------- Print-first typography ---------- */
+@page {
+  size: A4;
+  margin: 2.2cm 2cm 2.4cm 2cm;
+  @bottom-center {
+    content: counter(page) " / " counter(pages);
+    font-family: "Times New Roman", serif;
+    font-size: 9pt;
+    color: #666;
+  }
+}
+
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+body {
+  font-family: "Times New Roman", "Source Han Serif SC", "Songti SC", "Noto Serif CJK SC", serif;
+  font-size: 10.5pt;
+  line-height: 1.55;
+  color: #111;
+  max-width: 780px;
+  margin: 40px auto;
+  padding: 0 24px;
+  background: #fff;
+}
+
+h1, h2, h3, h4 {
+  font-family: "Helvetica Neue", "PingFang SC", "Source Han Sans SC", sans-serif;
+  color: #111;
+  page-break-after: avoid;
+}
+
+h1 {
+  font-size: 18pt;
+  text-align: center;
+  margin: 0 0 0.6em 0;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+h2 {
+  font-size: 13pt;
+  margin: 1.8em 0 0.6em;
+  border-bottom: 1px solid #222;
+  padding-bottom: 4px;
+}
+
+h3 {
+  font-size: 11.5pt;
+  margin: 1.3em 0 0.4em;
+}
+
+h4 {
+  font-size: 10.5pt;
+  margin: 1em 0 0.3em;
+  font-style: italic;
+  font-family: "Times New Roman", serif;
+}
+
+/* ---------- Meta block (authors / date) ---------- */
+.meta {
+  text-align: center;
+  font-size: 10pt;
+  color: #444;
+  margin-bottom: 1.4em;
+  font-family: "Helvetica Neue", sans-serif;
+}
+.meta .affil { font-size: 9pt; color: #666; }
+
+/* ---------- Abstract ---------- */
+.abstract {
+  background: #f6f6f4;
+  border-left: 3px solid #333;
+  padding: 12px 18px;
+  margin: 1em 0 1.8em;
+  font-size: 10pt;
+  line-height: 1.6;
+}
+.abstract .label {
+  font-weight: 700;
+  font-family: "Helvetica Neue", sans-serif;
+  margin-right: 0.6em;
+}
+
+/* ---------- Body paragraphs ---------- */
+p { text-align: justify; margin: 0 0 0.8em; }
+
+code, pre {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5pt;
+}
+code { background: #f2f2f0; padding: 1px 4px; border-radius: 3px; }
+pre {
+  background: #f7f7f5;
+  border: 1px solid #e0e0dc;
+  border-radius: 4px;
+  padding: 10px 14px;
+  overflow-x: auto;
+  page-break-inside: avoid;
+}
+
+/* ---------- Figures ---------- */
+figure {
+  margin: 1.4em 0;
+  text-align: center;
+  page-break-inside: avoid;
+}
+figure img {
+  max-width: 100%;
+  border: 1px solid #d8d8d4;
+  border-radius: 3px;
+}
+figcaption {
+  font-family: "Helvetica Neue", sans-serif;
+  font-size: 9pt;
+  color: #333;
+  margin-top: 8px;
+  text-align: center;
+  line-height: 1.45;
+}
+figcaption .label { font-weight: 700; margin-right: 0.4em; }
+
+/* ---------- Tables ---------- */
+table {
+  border-collapse: collapse;
+  margin: 0.6em auto 0.3em;
+  font-size: 9.5pt;
+  font-family: "Helvetica Neue", "PingFang SC", sans-serif;
+  page-break-inside: avoid;
+}
+table thead {
+  background: #eee;
+  border-top: 1px solid #222;
+  border-bottom: 1px solid #222;
+}
+table tbody tr { border-bottom: 1px solid #eaeaea; }
+table tbody tr:last-child { border-bottom: 1px solid #222; }
+th, td { padding: 5px 10px; text-align: left; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+caption {
+  caption-side: top;
+  font-family: "Helvetica Neue", sans-serif;
+  font-size: 9pt;
+  color: #333;
+  padding: 4px 0;
+  text-align: center;
+}
+caption .label { font-weight: 700; margin-right: 0.4em; }
+
+/* ---------- Callouts ---------- */
+.callout {
+  background: #fff8e1;
+  border-left: 3px solid #c59500;
+  padding: 8px 14px;
+  margin: 0.8em 0;
+  font-size: 9.8pt;
+  line-height: 1.5;
+}
+.callout.warn { background: #fdecea; border-left-color: #c0392b; }
+
+/* ---------- Lists ---------- */
+ul, ol { padding-left: 1.4em; margin: 0.4em 0 0.8em; }
+li { margin-bottom: 0.25em; }
+
+/* ---------- Footer / refs ---------- */
+.refs {
+  font-size: 9pt;
+  border-top: 1px solid #999;
+  padding-top: 10px;
+  margin-top: 2em;
+  color: #333;
+}
+
+/* ---------- Page-break helpers ---------- */
+.pagebreak { page-break-before: always; }
+</style>
+</head>
+<body>
+
+<h1>三路 Coding Agent Runtime 在 SWE-bench Verified 上的 Token 结构与 Memory 行为对比</h1>
+
+<div class="meta">
+  OpenClaw Research · Direction B Preliminary Report<br>
+  2026 年 4 月 · mem5_full_20260417_v2 数据集<br>
+  <span class="affil">实验标识 <code>mem5_full_20260417_v2</code> · SWE-bench Verified <code>astropy__astropy-12907</code> · 后端 Kimi K2 for coding</span>
+</div>
+
+<div class="abstract">
+<span class="label">摘要</span>
+本研究在 SWE-bench Verified 的一道真实 issue (<code>astropy__astropy-12907</code>) 上，
+对三套不同实现路径的 coding-agent runtime —— <b>openclaw</b>、<b>hermes</b>、
+<b>claude-code (openclaude)</b> —— 进行 3 × 5 = 15 次串行运行的严格对比。
+所有 runtime 统一路由到同一后端模型 Kimi K2 for coding，从而排除 LLM 差异，
+分离出 runtime 在 (i) token 账面结构、(ii) cache 复用、(iii) 多轮 memory 行为
+三个维度上的固有差别。
+主要发现：(1) 三者产生了近乎正交的 token profile —— openclaw 完全无 cache，
+hermes 约 95% 为 cache_read，claude-code 达到 ~99% cache_read 且 pure_input 为 0；
+(2) 在 100% 通过 harness 的前提下，按 provider-agnostic 的 <i>cost_tokens</i> 口径
+claude-code 最省 (245 k) &lt; hermes (263 k) &lt; openclaw (526 k)；
+(3) memory 复用信号在 openclaw 上最强 (工具调用 R1 → R5 降 84%，延迟降 77%)，
+claude-code 中等 (−33%)，hermes 几乎无效应且出现 R4 外点；
+(4) 发现并修正了 openclaude 自报的 <code>costUSD</code> 字段 —— 它按 Anthropic Sonnet/Opus
+定价估算，对 Kimi 后端高估 ~100 倍，若不纠正会严重污染跨 runtime 成本比较。
+</div>
+
+<!-- ============================================================ -->
+<h2>1 &nbsp; 引言</h2>
+
+<p>当我们把不同的 coding-agent runtime 接到同一个 LLM 后端上评测时，
+一个常被忽视的问题是：<b>不同 runtime 报出的 token 数字并不在同一口径上</b>。
+同一次 LLM 调用，hermes 会把 cache 命中的历史 prompt 计入 <code>runtime_tokens</code>，
+openclaw 会把它完全排除，openclaude 的 <code>modelUsage.inputTokens</code> 则直接包含
+<code>cacheReadInputTokens</code>。如果简单地做 <code>tokens_total</code> 对齐，
+会得到一个严重误导的结论 ——「openclaw 明显最便宜」—— 尽管 openclaw 实际上是
+三者中唯一不做 cache 的 runtime，每个 token 都按全价付费。</p>
+
+<p>本报告的目标有三：</p>
+<ol>
+<li>建立一个 provider-agnostic 的五桶 token 计量口径 (pure_input / cache_read / cache_write / output / reasoning)，
+让三个 runtime 在同一张表上可比；</li>
+<li>在 Direction B 的多轮场景 —— runtime 状态在 5 轮之间复用 —— 下测量 memory 复用
+给每个 runtime 带来的 tool / token / latency 节省；</li>
+<li>为后续多实例扩展提供一个稳定的 cost 指标体系：<i>cost_tokens</i> (等价 input-token 数，
+provider 无关) 与 <i>cost_usd</i> (Kimi 定价折算真实成本)。</li>
+</ol>
+
+<p>本次是 <b>单任务初步实验</b>。单实例本身无法泛化，但它作为 mem5_full 数据管线的
+验证跑，目的是 (a) 校验 token/cost 口径正确、(b) 暴露可能的计量陷阱、
+(c) 给出值得关注的假设以指导后续多实例扩展。</p>
+
+<!-- ============================================================ -->
+<h2>2 &nbsp; 方法</h2>
+
+<h3>2.1 &nbsp; 实验设计</h3>
+<p>每个 runtime 在同一任务 <code>astropy__astropy-12907</code> 上跑 5 轮。第 1 轮前清空
+<code>runtime_state</code> 目录，第 2–5 轮复用上一轮留下的状态（文件、对话历史、工作笔记等），
+即"memory-enabled"模式。每一轮的产出 patch 交由 SWE-bench 官方 Docker harness 独立评测。</p>
+
+<table>
+<caption><span class="label">表 1</span> 实验变量与常量</caption>
+<thead>
+<tr><th>类别</th><th>变量</th><th>值</th></tr>
+</thead>
+<tbody>
+<tr><td>变量</td><td>Runtime</td><td>openclaw / hermes / claude-code</td></tr>
+<tr><td>变量</td><td>Round (R)</td><td>1, 2, 3, 4, 5</td></tr>
+<tr><td>常量</td><td>LLM 后端</td><td>Kimi K2 for coding (统一路由)</td></tr>
+<tr><td>常量</td><td>任务</td><td>SWE-bench Verified · <code>astropy__astropy-12907</code></td></tr>
+<tr><td>常量</td><td>模式</td><td><code>repo-mentioned</code> (给 agent 最小仓库上下文)</td></tr>
+<tr><td>常量</td><td>记分</td><td>官方 SWE-bench Docker harness · <code>resolved</code> 布尔</td></tr>
+</tbody>
+</table>
+
+<h3>2.2 &nbsp; 五桶 Token 分解</h3>
+<p>我们在所有 runtime 上强制采用同一 <code>usage_details</code> 词汇：
+<code>input_tokens</code>、<code>cache_read_tokens</code>、<code>cache_write_tokens</code>、
+<code>output_tokens</code>、<code>reasoning_tokens</code>。
+<code>input_tokens</code> 指<b>非 cache 的纯输入</b>，即 openclaude 的
+<code>modelUsage.inputTokens</code> 减去 <code>cacheReadInputTokens</code> 之后的值。
+这一步让三个 runtime 语义对齐，之后 <code>provider_tokens</code> 与
+<code>runtime_tokens</code> 由完全相同的公式派生：</p>
+
+<pre>provider_tokens  = pure_input + cache_write + output + reasoning
+runtime_tokens   = provider_tokens + cache_read</pre>
+
+<h3>2.3 &nbsp; 双成本口径</h3>
+
+<p><b>cost_tokens</b> (provider 无关)：五桶加权求和，权重镜像 Anthropic 相对定价，
+让数字在跨 provider 时仍稳定。</p>
+<pre>cost_tokens = 1.0·pure_input + 0.1·cache_read + 1.25·cache_write + 3.0·output + 3.0·reasoning</pre>
+
+<p><b>cost_usd</b> (Kimi 定价)：按 Kimi-for-coding 公开价折算真美元 (单位 $/M)：
+input 0.15、cache_read 0.015、cache_write 0.1875、output 2.50、reasoning 2.50。</p>
+
+<h3>2.4 &nbsp; TEFS 定义</h3>
+<p>Token Efficiency Function Score (TEFS) 用于衡量"每 1 k token 产生多少成功任务"：</p>
+<pre>TEFS = resolved_score / (cost_tokens / 1000)</pre>
+<p>当 <code>score = 0</code> 或 <code>score = None</code> (未评测) 时 TEFS 返回 None，
+而不是 0 —— 这避免了把「花了很多钱但差一点通过」的 run 与「便宜且离题」的 run 混为
+"零效率"。</p>
+
+<h3 id="sec-openclaude-cost">2.5 &nbsp; openclaude <code>costUSD</code> 不可信 — 校正方案</h3>
+<div class="callout warn">
+<b>警告：</b>openclaude 的 <code>modelUsage.costUSD</code> 字段在运行时用<b>硬编码的 Anthropic
+Sonnet / Opus 定价</b>估算，与实际后端无关。当后端是 Kimi-for-coding 时，
+input 真实 $0.15/M vs Anthropic Sonnet $3.00/M，差 20×；
+output 真实 $2.50/M vs $15/M，差 6×；综合下来 openclaude 自报成本对 Kimi 后端
+<b>高估 ~100 倍</b>。本次首轮 smoke 跑时就见到 $8.69 vs 期望 $0.05 的巨大偏差。
+</div>
+
+<p>修正做法：runner 层把上游原始值保留为 <code>upstream_reported_cost_usd</code> (调试用)，
+同时<b>不</b>写入 <code>provider_cost_usd</code>。下游 <code>cost_usd()</code> 函数因此
+自动落入后备路径 —— 用 5 桶分解乘以 Kimi 定价重算。测试用例
+(<code>test_cost_usd_ignores_upstream_reported_for_openclaude</code>) 锁住这一行为，
+防止回归。</p>
+
+<!-- ============================================================ -->
+<h2>3 &nbsp; 结果</h2>
+
+<h3>3.1 &nbsp; 任务完成率</h3>
+<p>15 次运行 <b>全部通过</b> SWE-bench harness 评测 (图 1)。这意味着
+<code>astropy__astropy-12907</code> 对三个 runtime 都算简单任务，任务难度维度在单实例下
+被饱和 (saturated)。后续的差异分析必须从过程指标 —— tool_calls、tokens、latency ——
+而非 resolved 率切入。</p>
+
+<figure>
+<img src="resolved_heatmap.png" alt="Resolved heatmap: 3×5 all green">
+<figcaption><span class="label">图 1</span> 每轮 harness 通过情况热力图。
+3 agent × 5 round = 15 cell 全绿，通过率 100%。单实例下难度不再是区分维度。</figcaption>
+</figure>
+
+<h3>3.2 &nbsp; Token 结构 — 三分天下</h3>
+<p>图 2 按五桶堆叠每个 agent 的平均 tokens / run。三种 profile 几乎正交：</p>
+
+<ul>
+<li><b>openclaw</b>：<code>cache_read = cache_write = 0</code>，pure_input 占主体 (515.7 k)，
+每次调用把 prompt 原样发给 provider，每一个 token 都按 full price 计费。</li>
+<li><b>hermes</b>：cache_read 约 1.52 M，占 runtime_tokens 的 ~95%；pure_input 仅 54.8 k。
+向 provider 付费的部分极小。</li>
+<li><b>claude-code</b>：cache_read ~1.93 M，占 runtime_tokens 约 99%，且
+<code>pure_input = 0</code>。这是因为 openclaude 的 <code>modelUsage.inputTokens</code>
+完全等于 <code>cacheReadInputTokens</code>，runner 做减法后余数为 0 —— 极端
+cache-heavy 的运行模式。</li>
+</ul>
+
+<figure>
+<img src="token_breakdown.png" alt="Five-bucket stacked token breakdown">
+<figcaption><span class="label">图 2</span> 五桶 token 结构平均值 / run。
+openclaw 整根柱几乎是 pure_input；hermes 与 claude-code 被 cache_read 主导，
+total runtime tokens 是 openclaw 的 3.1× 与 3.8×，但 provider 可计费部分反而更小。</figcaption>
+</figure>
+
+<h3>3.3 &nbsp; 成本对比</h3>
+
+<table>
+<caption><span class="label">表 2</span> 两个成本口径下的平均 / run</caption>
+<thead>
+<tr><th>Agent</th><th class="num">cost_tokens</th><th class="num">cost_usd</th><th class="num">provider_tokens</th><th class="num">runtime_tokens</th></tr>
+</thead>
+<tbody>
+<tr><td>openclaw</td><td class="num">526 k</td><td class="num">$0.086</td><td class="num">519 k</td><td class="num">519 k</td></tr>
+<tr><td>hermes</td><td class="num">263 k</td><td class="num">$0.077</td><td class="num">73 k</td><td class="num">1,593 k</td></tr>
+<tr><td>claude-code</td><td class="num"><b>245 k</b></td><td class="num"><b>$0.073</b></td><td class="num">18 k</td><td class="num">1,946 k</td></tr>
+</tbody>
+</table>
+
+<figure>
+<img src="cost_comparison.png" alt="cost_tokens vs cost_usd bar charts">
+<figcaption><span class="label">图 3</span> 左：<i>cost_tokens</i> (等价 input-token 数)；
+右：<i>cost_usd</i> (Kimi 定价)。两口径排序一致 claude-code &lt; hermes &lt; openclaw，
+但 cost_usd 差距更小 —— 因为 Kimi 对 cache_read 只收 0.1× input 价。</figcaption>
+</figure>
+
+<p>两个口径给出的排序一致，但含义不同：</p>
+<ul>
+<li><i>cost_tokens</i> 直观反映"我让 LLM 真正工作了多少" —— openclaw 的 526 k 与
+claude-code 的 245 k 相差 2.15×；</li>
+<li><i>cost_usd</i> 反映"钱包真实受伤程度"，相差只有 1.18× —— Kimi cache_read
+($0.015/M) 定价极度优待了 hermes 与 claude-code 的 cache-heavy 模式。</li>
+</ul>
+
+<h3>3.4 &nbsp; TEFS 排名</h3>
+
+<table>
+<caption><span class="label">表 3</span> TEFS (cost_tokens 基底)</caption>
+<thead>
+<tr><th>Agent</th><th class="num">TEFS</th><th>含义</th></tr>
+</thead>
+<tbody>
+<tr><td>claude-code</td><td class="num"><b>0.0047</b></td><td>每 1 k 等价 input-token 0.47% 通过</td></tr>
+<tr><td>hermes</td><td class="num">0.0040</td><td>每 1 k 等价 input-token 0.40% 通过</td></tr>
+<tr><td>openclaw</td><td class="num">0.0021</td><td>每 1 k 等价 input-token 0.21% 通过</td></tr>
+</tbody>
+</table>
+
+<p>在 100% resolved 的前提下，TEFS 完全由分母决定。它目前只能解读为"cache 使用模式的效率"，
+不能归因为"agent 智能差异"。要让 TEFS 真正刻画能力差异，必须先引入<b>有失败率的任务集</b>。</p>
+
+<h3>3.5 &nbsp; Memory 复用曲线 — Direction B 核心信号</h3>
+<p>图 4 展示每个 agent 的 tool_calls 与 cost_tokens 随 round 的变化。state 在 R1 后复用。</p>
+
+<figure>
+<img src="memory_curve.png" alt="Multi-round memory reuse curves">
+<figcaption><span class="label">图 4</span> 五轮 memory 行为曲线。
+左：工具调用数；右：cost_tokens。state 在 R1 后复用。</figcaption>
+</figure>
+
+<table>
+<caption><span class="label">表 4</span> 每个 agent R1 → R5 的 tool_calls 与 cost_tokens 细目</caption>
+<thead>
+<tr><th>Agent</th><th>R1</th><th>R2</th><th>R3</th><th>R4</th><th>R5</th><th class="num">Δ(R5−R1) tools</th><th class="num">Δ cost_tokens</th></tr>
+</thead>
+<tbody>
+<tr><td>openclaw · tools</td><td class="num">32</td><td class="num">13</td><td class="num">6</td><td class="num">7</td><td class="num"><b>5</b></td><td class="num"><b>−27 (−84%)</b></td><td class="num">−498 k (−57%)</td></tr>
+<tr><td>openclaw · cost_tokens (k)</td><td class="num">876</td><td class="num">582</td><td class="num">346</td><td class="num">450</td><td class="num">378</td><td class="num"></td><td class="num"></td></tr>
+<tr><td>hermes · tools</td><td class="num">49</td><td class="num">41</td><td class="num">39</td><td class="num"><b>72 ★</b></td><td class="num">42</td><td class="num">−7</td><td class="num">+13 k (+6%)</td></tr>
+<tr><td>hermes · cost_tokens (k)</td><td class="num">225</td><td class="num">206</td><td class="num">239</td><td class="num">406</td><td class="num">238</td><td class="num"></td><td class="num"></td></tr>
+<tr><td>claude-code · tools</td><td class="num">70</td><td class="num">55</td><td class="num">54</td><td class="num">31</td><td class="num">47</td><td class="num">−23 (−33%)</td><td class="num">−220 k (−57%)</td></tr>
+<tr><td>claude-code · cost_tokens (k)</td><td class="num">383</td><td class="num">283</td><td class="num">257</td><td class="num"><b>140</b></td><td class="num">163</td><td class="num"></td><td class="num"></td></tr>
+</tbody>
+</table>
+
+<p>三种行为模式：</p>
+<ol>
+<li><b>openclaw — 强单调递减</b>。工具调用从 32 掉到 5，延迟从 253 s 掉到 59 s
+(未列于表中)。memory 复用让它不再重新探索仓库，直接基于前一轮的工作成果继续产 patch。
+由于它没有 cache 机制，所有节省都来自状态复用 —— 信号非常"纯净"。</li>
+<li><b>hermes — 近似平稳 + R4 外点</b>。R1 → R5 的 Δtools 仅 −7，cost_tokens 还略有
+上升。R4 是明显外点 (72 tools、1274 s、runtime_tokens 翻倍到 2.67 M)，R5 立即回落，
+说明不是累积性退化，而是单轮级别的 tool-loop 或采样噪声。</li>
+<li><b>claude-code — 中等递减 + R4 谷底</b>。整体下降约 1/3 的工具调用与一半的 cost_tokens，
+但曲线不单调，R4 反而是最低点 (31 tools)、R5 小幅回弹。这与 claude-code 内置的
+TODO-list / plan-revise 行为相符 —— 它可能每隔几轮会"重新规划"一次。</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>4 &nbsp; 讨论</h2>
+
+<h3>4.1 &nbsp; 为什么 openclaw 的 memory 信号最强？</h3>
+<p>hermes 与 claude-code 本身就带 cache 机制 —— 大量"复用历史对话"已经由 LLM provider
+层的 cache 吸收，不依赖 runtime 层的 state 复用。因此，当我们把 <code>runtime_state</code>
+从头复用给它们时，边际收益被 provider-cache 遮蔽。openclaw 没有 cache，
+<b>所有 memory 效应都必须由 runtime 层显式兑现</b>，曲线因此最陡。</p>
+
+<p>一个推论：观测 memory 行为最灵敏的 runtime 是"无 cache + 有 state"的；反过来说，
+如果 future 研究希望隔离 memory 贡献，需要把 provider-cache 的贡献显式减除，
+否则会低估 memory 的真实价值。</p>
+
+<h3>4.2 &nbsp; cost_tokens vs cost_usd — 为什么要两个口径同时维护</h3>
+<p>本报告两次给出成本排序，两次都一致 (claude-code &lt; hermes &lt; openclaw)，
+但 <i>两者不总是一致</i>。cache_read 的权重差异：<i>cost_tokens</i> 里是 0.1×，
+<i>cost_usd</i> 里 Kimi 给到 0.1× (0.015 / 0.15)。两个系数相同是巧合 ——
+如果后端换成 Anthropic，cache_read 的美元折扣是 0.1× (0.30 vs 3.00)；
+若换成 OpenAI 某些 gpt 系列，cache 可能是 0.5×。<i>cost_tokens</i> 保证跨 provider
+稳定的横向排序；<i>cost_usd</i> 回答"老板眼中的账单"。必须同时维护。</p>
+
+<h3>4.3 &nbsp; openclaude <code>costUSD</code> 陷阱的警示</h3>
+<p>本次 smoke 验证阶段就见到 openclaude 自报 $8.69 vs 用 Kimi 定价重算后的 $0.05。
+若当时没做这个对齐，在全部 15 run 后 $8.69 × 5 = $43 的"openclaude 最贵"的结论
+将被写进所有报表。这提醒我们：<b>任何 runtime 自报的 cost 字段都必须先验证它
+使用的是不是当前后端的定价</b>。规则：<i>runner 层永远不信任上游 cost；cost 字段统一
+在分析层由 token 分解 + 当前后端价重算</i>。</p>
+
+<!-- ============================================================ -->
+<h2>5 &nbsp; 局限</h2>
+
+<ol>
+<li><b>单实例</b>。<code>astropy__astropy-12907</code> 是一个难度偏低的 issue，
+所有 agent 首轮就通过。所有结论限于这一道题，特别地 memory 曲线形状
+可能在更复杂的任务上完全不同。</li>
+<li><b>单 seed</b>。hermes 的 R4 外点 (72 tools vs 均值 41) 暗示 run-to-run 方差可能
+很大，未来应做 ≥3 seed 均值 ± 标准差。</li>
+<li><b>串行累积依赖</b>。R5 的表现受 R1 → R4 状态链影响；严格归因 memory 贡献
+需要"每轮 clean start"的对照组 (memory-off baseline)。</li>
+<li><b>任务难度饱和</b>。100% resolved 下 TEFS 排名完全是 cost 排名的等价物，
+无法分离"能力"与"成本"两个维度。</li>
+</ol>
+
+<h2>6 &nbsp; 下一步</h2>
+<ol>
+<li>扩展到 5 道 SWE-bench 实例 (简单/中等/困难各若干)，保持 3 × 5 = 15 run / 实例。</li>
+<li>加 memory-off 对照组 (每轮清空 state)，量化 memory 净贡献。</li>
+<li>对 hermes 的 R4 spike 做 trace 分析 (是 tool-loop、state 漂移、还是采样噪声)。</li>
+<li>把 <code>upstream_reported_cost_usd</code> vs 后备计算的偏差纳入 CI 检查，
+防止未来加新 runtime 时再次踩 cost 口径的坑。</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>7 &nbsp; 结论</h2>
+<p>在一个 SWE-bench Verified 实例、三个 coding-agent runtime、共享 Kimi K2 后端的
+严格受控对比下，我们发现：三者的 <b>token 账面结构几乎正交</b>
+(openclaw 无 cache · hermes 95% cache · claude-code 99% cache)；在 100% 任务通过的
+前提下，按 provider-agnostic 的 <i>cost_tokens</i> 口径 claude-code 最省 (245 k)、
+openclaw 最贵 (526 k)；<b>memory 复用给 openclaw 带来 84% 的工具调用降幅</b>，
+是三者中最强的 memory 信号，原因是它不被 provider-cache 遮蔽。
+同时，我们锁定并修正了 openclaude 自报 <code>costUSD</code> 按 Anthropic 定价估算、
+对 Kimi 后端高估 ~100 倍的计量陷阱。下一步将扩到多实例 + memory-off 对照组，
+把本报告中的单实例现象升级为统计意义上的发现。</p>
+
+<!-- ============================================================ -->
+<h2>附录 A &nbsp; 逐轮完整数据</h2>
+
+<table>
+<caption><span class="label">表 A.1</span> 逐轮详细指标 (Kimi K2 · astropy__astropy-12907 · resolved=True × 15)</caption>
+<thead>
+<tr><th>Agent</th><th>R</th><th class="num">tools</th><th class="num">latency (s)</th><th class="num">provider (k)</th><th class="num">runtime (k)</th><th class="num">pure_in (k)</th><th class="num">cache_r (k)</th><th class="num">output (k)</th><th class="num">cost_tokens (k)</th><th class="num">cost_usd</th></tr>
+</thead>
+<tbody>
+<tr><td>openclaw</td><td>1</td><td class="num">32</td><td class="num">253</td><td class="num">857</td><td class="num">857</td><td class="num">848</td><td class="num">0</td><td class="num">9.3</td><td class="num">876</td><td class="num">$0.151</td></tr>
+<tr><td>openclaw</td><td>2</td><td class="num">13</td><td class="num">140</td><td class="num">578</td><td class="num">578</td><td class="num">575</td><td class="num">0</td><td class="num">2.4</td><td class="num">582</td><td class="num">$0.092</td></tr>
+<tr><td>openclaw</td><td>3</td><td class="num">6</td><td class="num">91</td><td class="num">343</td><td class="num">343</td><td class="num">341</td><td class="num">0</td><td class="num">1.8</td><td class="num">346</td><td class="num">$0.056</td></tr>
+<tr><td>openclaw</td><td>4</td><td class="num">7</td><td class="num">104</td><td class="num">446</td><td class="num">446</td><td class="num">444</td><td class="num">0</td><td class="num">1.9</td><td class="num">450</td><td class="num">$0.071</td></tr>
+<tr><td>openclaw</td><td>5</td><td class="num">5</td><td class="num">59</td><td class="num">374</td><td class="num">374</td><td class="num">372</td><td class="num">0</td><td class="num">1.7</td><td class="num">378</td><td class="num">$0.060</td></tr>
+<tr><td>hermes</td><td>1</td><td class="num">49</td><td class="num">615</td><td class="num">65</td><td class="num">1,441</td><td class="num">53.5</td><td class="num">1,377</td><td class="num">11.4</td><td class="num">225</td><td class="num">$0.057</td></tr>
+<tr><td>hermes</td><td>2</td><td class="num">41</td><td class="num">494</td><td class="num">67</td><td class="num">1,163</td><td class="num">52.0</td><td class="num">1,096</td><td class="num">14.7</td><td class="num">206</td><td class="num">$0.061</td></tr>
+<tr><td>hermes</td><td>3</td><td class="num">39</td><td class="num">1,056</td><td class="num">68</td><td class="num">1,319</td><td class="num">45.1</td><td class="num">1,251</td><td class="num">22.8</td><td class="num">239</td><td class="num">$0.083</td></tr>
+<tr><td>hermes</td><td>4</td><td class="num">72</td><td class="num">1,274</td><td class="num">98</td><td class="num">2,672</td><td class="num">73.0</td><td class="num">2,574</td><td class="num">25.1</td><td class="num">406</td><td class="num">$0.112</td></tr>
+<tr><td>hermes</td><td>5</td><td class="num">42</td><td class="num">703</td><td class="num">69</td><td class="num">1,376</td><td class="num">50.1</td><td class="num">1,307</td><td class="num">18.9</td><td class="num">238</td><td class="num">$0.075</td></tr>
+<tr><td>claude-code</td><td>1</td><td class="num">70</td><td class="num">881</td><td class="num">21</td><td class="num">3,216</td><td class="num">0</td><td class="num">3,195</td><td class="num">21.3</td><td class="num">383</td><td class="num">$0.101</td></tr>
+<tr><td>claude-code</td><td>2</td><td class="num">55</td><td class="num">1,007</td><td class="num">23</td><td class="num">2,160</td><td class="num">0</td><td class="num">2,137</td><td class="num">23.1</td><td class="num">283</td><td class="num">$0.090</td></tr>
+<tr><td>claude-code</td><td>3</td><td class="num">54</td><td class="num">1,351</td><td class="num">15</td><td class="num">2,128</td><td class="num">0</td><td class="num">2,113</td><td class="num">15.4</td><td class="num">257</td><td class="num">$0.070</td></tr>
+<tr><td>claude-code</td><td>4</td><td class="num">31</td><td class="num">557</td><td class="num">13</td><td class="num">1,033</td><td class="num">0</td><td class="num">1,021</td><td class="num">12.7</td><td class="num">140</td><td class="num">$0.047</td></tr>
+<tr><td>claude-code</td><td>5</td><td class="num">47</td><td class="num">526</td><td class="num">15</td><td class="num">1,192</td><td class="num">0</td><td class="num">1,177</td><td class="num">15.2</td><td class="num">163</td><td class="num">$0.056</td></tr>
+</tbody>
+</table>
+
+<div class="refs">
+<b>数据 &amp; 代码：</b>
+原始 JSON: <code>data/raw/swe_astropy__astropy-12907_{agent}_mem5_full_20260417_v2_r{01..05}.json</code> (15 条)；
+图：<code>results/mem5_full_v2/{token_breakdown,cost_comparison,memory_curve,resolved_heatmap}.png</code>；
+度量实现：<code>analysis/metrics.py</code>；
+runner 对齐逻辑：<code>adapters/agent_runner.py</code>；
+测试锁：<code>tests/test_metrics.py::test_cost_usd_ignores_upstream_reported_for_openclaude</code>。
+</div>
+
+</body>
+</html>
