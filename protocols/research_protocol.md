@@ -100,12 +100,12 @@ python run.py swebench \
 
 ## 当前默认实验方案（Direction B）
 
-- **记忆维度不再使用 MemoryAgentBench quick-test**，改为多轮 SWE-bench run
-- 默认实验协议：`--runtime-profile memory-enabled --rounds 5`，5 轮复用同一 state
-- 任务成功率、记忆稳定性、Token 效率三个维度共享同一批 run，无需单独跑记忆 benchmark
-- 记忆曲线分析：`python run.py curve --run-id RUN_ID`，见 `analysis/memory_curve.py`
-- `memory_adapter.py` 保留为可选冒烟工具（`--generate-config` 仍可用），不再是主路径
-- 详见 `protocols/memory_protocol.md`（Direction B 版本）
+- **instance pool**：使用 `benchmarks/swebench_instances.yaml` 中的命名集合（`pilot`、`phase1`），不再用临时 `--instance-ids`
+- **成功率**：只接受 `metrics.resolved=True`（harness 判定），`task_completed` 字段保留但只表示 "CLI 退出 + 出了 patch"
+- **token 效率**：由 `analysis.metrics.tefs(record, score=...)` 计算，当 score 为 0 或 None 时 TEFS 未定义（返回 None），不要用 0 代替
+- **memory 维度**：只使用 `--runtime-profile memory-enabled --rounds N` 的多轮数据，通过 `analysis.memory_curve` 产出曲线；MemoryAgentBench quick-test 已从主路径下线
+- **错误分类**：用 `analysis.outcome.classify(record)` 得到 `Outcome` 枚举，不要再靠手写 `result=pass/fail/error`
+- **运行元数据**：每条 `data/raw/swe_*.json` 必须带 `env` 块（model / prompt_hash / timeout / runtime_profile / host），用于审计与复现
 
 ## 当前仓库状态
 - OpenClaw 已支持真实 workspace 模式，可直接在本地 git 工作区改文件并导出 patch
