@@ -1,10 +1,11 @@
 """
-可视化脚本 — 生成三个维度的对比图表。
+可视化脚本 — 为 Direction B（多轮 SWE-bench）数据生成对比图表。
 
 用法:
-    python analysis/visualize.py                # 从 data/raw/ 加载
-    python analysis/visualize.py --demo         # 使用 sample data
-    python analysis/visualize.py --output results/  # 指定输出目录
+    python -m analysis.visualize                     # 从 data/raw/ 加载
+    python -m analysis.visualize --demo              # 使用 sample data
+    python -m analysis.visualize --output results/   # 指定输出目录
+    python -m analysis.visualize --run-id <substr>   # 只画某个 run group
 """
 
 import argparse
@@ -19,140 +20,165 @@ import seaborn as sns
 matplotlib.rcParams["font.sans-serif"] = ["PingFang SC", "Heiti SC", "Arial Unicode MS", "DejaVu Sans"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-from compare import AGENTS, load_data, filter_records, flatten_metrics
+from analysis.compare import AGENTS, load_data, filter_records, flatten_metrics
 
 COLORS = {"openclaw": "#4CAF50", "hermes": "#FF9800", "claude-code": "#2196F3"}
 
 
-def _token_column(df):
-    if "provider_tokens_total" in df.columns:
-        return "provider_tokens_total"
-    if "tokens_total" in df.columns:
-        return "tokens_total"
-    return None
-
-
-def plot_radar(df, output_dir: Path) -> None:
-    """雷达图：三个 agent 在三个维度的综合表现。"""
-    # 归一化各维度到 0-1
-    scores = {}
-    token_col = _token_column(df)
-    for agent in AGENTS:
-        agent_data = df[df["agent"] == agent]
-        mem = agent_data[agent_data["dimension"] == "memory"]
-        tok = agent_data[agent_data["dimension"] == "token_efficiency"]
-        suc = agent_data[agent_data["dimension"] == "task_success"]
-
-        memory_score = mem["recall_accuracy"].mean() if not mem.empty and "recall_accuracy" in mem else 0
-        # Token 效率用倒数归一化（越少越好）
-        token_val = tok[token_col].mean() if not tok.empty and token_col in tok else 5000
-        token_score = max(0, 1 - token_val / 5000)
-        success_score = (suc["result"] == "pass").mean() if not suc.empty and "result" in suc else 0
-
-        scores[agent] = [memory_score, token_score, success_score]
-
-    categories = ["记忆架构", "Token 效率", "任务成功率"]
-    n = len(categories)
-    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
-    angles += angles[:1]
-
-    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
-
-    for agent in AGENTS:
-        values = scores.get(agent, [0, 0, 0])
-        values += values[:1]
-        ax.plot(angles, values, "o-", linewidth=2, label=agent, color=COLORS[agent])
-        ax.fill(angles, values, alpha=0.15, color=COLORS[agent])
-
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(categories, fontsize=12)
-    ax.set_ylim(0, 1)
-    ax.set_title("Agent 综合能力对比", fontsize=16, pad=20)
-    ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1))
-
-    plt.tight_layout()
-    plt.savefig(output_dir / "radar_comparison.png", dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  ✓ radar_comparison.png")
+def _agent_values(df, column):
+    """Mean of `column` per agent, as a list ordered by AGENTS."""
+    return [
+        df[df["agent"] == agent][column].dropna().mean() if column in df.columns else np.nan
+        for agent in AGENTS
+    ]
 
 
 def plot_token_bars(df, output_dir: Path) -> None:
-    """柱状图：Token 消耗对比。"""
+    """分组柱状图：每个 agent 同时显示 runtime_tokens 与 provider_tokens。
+
+    runtime_tokens 是三者可比口径（包含 cache_read）；
+    provider_tokens 是计费口径。
+    两者差距只有 hermes 显著（因为只有它独立追踪 cache_read）。
+    """
     tok = df[df["dimension"] == "token_efficiency"]
     if tok.empty:
         print("  (无 token 数据)")
         return
-    token_col = _token_column(tok)
-    if token_col is None:
+
+    runtime_vals = _agent_values(tok, "runtime_tokens_total")
+    provider_vals = _agent_values(tok, "provider_tokens_total")
+
+    if all(np.isnan(v) for v in runtime_vals) and all(np.isnan(v) for v in provider_vals):
         print("  (无 token 数据)")
         return
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(AGENTS))
+    width = 0.38
 
-    task_ids = sorted(tok["task_id"].unique())
-    x = np.arange(len(task_ids))
-    width = 0.25
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.bar(x - width / 2, runtime_vals, width, label="runtime_tokens (含 cache_read)",
+           color=[COLORS[a] for a in AGENTS])
+    ax.bar(x + width / 2, provider_vals, width, label="provider_tokens (计费)",
+           color=[COLORS[a] for a in AGENTS], alpha=0.45, edgecolor="black", linewidth=0.5)
 
-    for i, agent in enumerate(AGENTS):
-        agent_data = tok[tok["agent"] == agent]
-        values = []
-        for tid in task_ids:
-            task_data = agent_data[agent_data["task_id"] == tid]
-            values.append(task_data[token_col].mean() if not task_data.empty else 0)
-        ax.bar(x + i * width, values, width, label=agent, color=COLORS[agent])
+    for i, (r, p) in enumerate(zip(runtime_vals, provider_vals)):
+        if not np.isnan(r):
+            ax.text(i - width / 2, r, f"{r:,.0f}", ha="center", va="bottom", fontsize=8)
+        if not np.isnan(p):
+            ax.text(i + width / 2, p, f"{p:,.0f}", ha="center", va="bottom", fontsize=8)
 
-    ax.set_xlabel("任务 ID")
-    ax.set_ylabel("Provider Token 总消耗" if token_col == "provider_tokens_total" else "Token 总消耗")
-    ax.set_title("Token 效率对比")
-    ax.set_xticks(x + width)
-    ax.set_xticklabels(task_ids)
-    ax.legend()
+    ax.set_xticks(x)
+    ax.set_xticklabels(AGENTS)
+    ax.set_ylabel("平均 tokens / run")
+    ax.set_title("Token 口径对比（apples-to-apples vs 计费视角）")
+    ax.legend(loc="upper right")
+    ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output_dir / "token_comparison.png", dpi=150)
     plt.close()
-    print(f"  ✓ token_comparison.png")
+    print("  ✓ token_comparison.png")
 
 
-def plot_success_heatmap(df, output_dir: Path) -> None:
-    """热力图：任务成功率矩阵。"""
-    suc = df[df["dimension"] == "task_success"]
-    if suc.empty:
-        print("  (无 success 数据)")
+def plot_memory_curve(df, output_dir: Path) -> None:
+    """多轮曲线：tool_calls 和 runtime_tokens 随 round 的变化 —— Direction B 核心信号。"""
+    tok = df[(df["dimension"] == "token_efficiency") & df["round"].notna()].copy()
+    if tok.empty:
+        print("  (无多轮数据，跳过 memory curve)")
         return
 
-    task_ids = sorted(suc["task_id"].unique())
-    matrix = []
-    for agent in AGENTS:
-        row = []
-        for tid in task_ids:
-            data = suc[(suc["agent"] == agent) & (suc["task_id"] == tid)]
-            if not data.empty and "quality_score" in data and data["quality_score"].notna().any():
-                row.append(data["quality_score"].mean())
-            elif not data.empty and "result" in data:
-                row.append((data["result"] == "pass").mean() * 5)
-            else:
-                row.append(0)
-        matrix.append(row)
+    tok["round"] = tok["round"].astype(int)
+    rounds = sorted(tok["round"].unique())
+    if len(rounds) < 2:
+        print("  (少于 2 轮，跳过 memory curve)")
+        return
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, (ax_tools, ax_tokens) = plt.subplots(1, 2, figsize=(13, 5))
+
+    for agent in AGENTS:
+        agent_data = tok[tok["agent"] == agent]
+        if agent_data.empty:
+            continue
+
+        tools_by_round = [agent_data[agent_data["round"] == r]["tool_calls_count"].mean()
+                          for r in rounds]
+        tokens_by_round = [agent_data[agent_data["round"] == r]["runtime_tokens_total"].mean()
+                           for r in rounds]
+
+        ax_tools.plot(rounds, tools_by_round, "o-", label=agent, color=COLORS[agent], linewidth=2)
+        ax_tokens.plot(rounds, tokens_by_round, "o-", label=agent, color=COLORS[agent], linewidth=2)
+
+    ax_tools.set_xlabel("Round (复用同一 runtime state)")
+    ax_tools.set_ylabel("tool_calls / round")
+    ax_tools.set_title("多轮工具调用曲线")
+    ax_tools.set_xticks(rounds)
+    ax_tools.grid(alpha=0.3)
+    ax_tools.legend()
+
+    ax_tokens.set_xlabel("Round (复用同一 runtime state)")
+    ax_tokens.set_ylabel("runtime_tokens / round")
+    ax_tokens.set_title("多轮 token 消耗曲线")
+    ax_tokens.set_xticks(rounds)
+    ax_tokens.grid(alpha=0.3)
+    ax_tokens.legend()
+
+    fig.suptitle("Memory 行为曲线（第 1 轮前清空 state，之后复用）", fontsize=13)
+    plt.tight_layout()
+    plt.savefig(output_dir / "memory_curve.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print("  ✓ memory_curve.png")
+
+
+def plot_resolved_heatmap(df, output_dir: Path) -> None:
+    """热力图：每个 (agent, round) 的 resolved 情况 —— 看多轮是否真的带来成功率提升。"""
+    tok = df[(df["dimension"] == "token_efficiency") & df["round"].notna()].copy()
+    if tok.empty:
+        print("  (无多轮数据，跳过 resolved heatmap)")
+        return
+
+    tok["round"] = tok["round"].astype(int)
+    rounds = sorted(tok["round"].unique())
+
+    matrix = []
+    annot = []
+    for agent in AGENTS:
+        row_vals = []
+        row_annot = []
+        for r in rounds:
+            cell = tok[(tok["agent"] == agent) & (tok["round"] == r)]
+            if cell.empty or "resolved" not in cell.columns or cell["resolved"].isna().all():
+                row_vals.append(np.nan)
+                row_annot.append("·")
+            else:
+                rate = cell["resolved"].fillna(False).astype(bool).mean()
+                row_vals.append(rate)
+                row_annot.append("✓" if rate >= 0.5 else "✗")
+        matrix.append(row_vals)
+        annot.append(row_annot)
+
+    if all(all(np.isnan(v) for v in row) for row in matrix):
+        print("  (无 resolved 字段数据，跳过 resolved heatmap)")
+        return
+
+    fig, ax = plt.subplots(figsize=(min(10, 2 + len(rounds)), 3.2))
     sns.heatmap(
         matrix,
-        annot=True,
-        fmt=".1f",
-        xticklabels=task_ids,
+        annot=annot,
+        fmt="",
+        xticklabels=[f"R{r}" for r in rounds],
         yticklabels=AGENTS,
-        cmap="YlOrRd",
+        cmap="RdYlGn",
         vmin=0,
-        vmax=5,
+        vmax=1,
+        linewidths=0.5,
+        cbar_kws={"label": "resolved rate"},
         ax=ax,
     )
-    ax.set_title("任务质量评分热力图")
-
+    ax.set_title("每轮 harness resolved 情况（· = 未评测）")
     plt.tight_layout()
-    plt.savefig(output_dir / "success_heatmap.png", dpi=150)
+    plt.savefig(output_dir / "resolved_heatmap.png", dpi=150)
     plt.close()
-    print(f"  ✓ success_heatmap.png")
+    print("  ✓ resolved_heatmap.png")
 
 
 def main():
@@ -175,9 +201,9 @@ def main():
     df = flatten_metrics(records)
 
     print("生成图表中...")
-    plot_radar(df, output_dir)
     plot_token_bars(df, output_dir)
-    plot_success_heatmap(df, output_dir)
+    plot_memory_curve(df, output_dir)
+    plot_resolved_heatmap(df, output_dir)
     print(f"\n所有图表已保存到 {output_dir}/")
 
 

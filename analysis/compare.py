@@ -164,12 +164,21 @@ def summarize_tokens(records: list[dict]) -> None:
     for r in tok_records:
         by_agent.setdefault(r["agent"], []).append(r)
 
+    print("  (runtime_tokens = all tokens processed by runtime incl. cache;")
+    print("   provider_tokens = billable non-cache tokens — only hermes tracks this separately)")
     for agent in AGENTS:
         rows = by_agent.get(agent)
         if not rows:
             continue
         prov = sum(provider_tokens(r) for r in rows) / len(rows)
         runt = sum(runtime_tokens(r) for r in rows) / len(rows)
+        cache_reads = [
+            (r.get("usage_details") or {}).get("cache_read_tokens")
+            for r in rows
+            if (r.get("usage_details") or {}).get("cache_read_tokens") is not None
+        ]
+        avg_cache = (sum(cache_reads) / len(cache_reads)) if cache_reads else None
+
         tool_calls = [
             (r.get("metrics") or {}).get("tool_calls_count")
             for r in rows
@@ -185,22 +194,24 @@ def summarize_tokens(records: list[dict]) -> None:
         resolved_rate = (sum(resolved_scores) / len(resolved_scores)) if resolved_scores else None
 
         tefs_values = [
-            tefs(r, score=(r.get("metrics") or {}).get("resolved") and 1.0 or None)
+            tefs(r, score=(r.get("metrics") or {}).get("resolved") and 1.0 or None, basis="runtime")
             for r in rows
         ]
         tefs_values = [v for v in tefs_values if v is not None]
         avg_tefs_resolved = (sum(tefs_values) / len(tefs_values)) if tefs_values else None
 
         parts = [f"  {agent:15s}",
-                 f"avg_provider_tokens={prov:.0f}"]
+                 f"avg_runtime_tokens={runt:.0f}"]
         if abs(runt - prov) >= 1:
-            parts.append(f"avg_runtime_tokens={runt:.0f}")
+            parts.append(f"avg_provider_tokens={prov:.0f}")
+            if avg_cache is not None:
+                parts.append(f"avg_cache_read={avg_cache:.0f}")
         if avg_tools is not None:
             parts.append(f"avg_tool_calls={avg_tools:.1f}")
         if resolved_rate is not None:
             parts.append(f"resolved_rate={resolved_rate:.0%}")
         if avg_tefs_resolved is not None:
-            parts.append(f"TEFS_resolved={avg_tefs_resolved:.4f}")
+            parts.append(f"TEFS_resolved(runtime)={avg_tefs_resolved:.4f}")
         print("  ".join(parts))
 
 
@@ -270,12 +281,12 @@ def summarize_rounds(df: pd.DataFrame) -> None:
             completion = _mean_if_present(agent_data, "task_completed")
             latency = _mean_if_present(agent_data, "latency_s")
             parts = [f"    {agent:13s}"]
-            if provider_total is not None:
-                parts.append(f"provider_tokens={provider_total:.0f}")
-            if runtime_total is not None and (
-                provider_total is None or abs(runtime_total - provider_total) >= 1
-            ):
+            if runtime_total is not None:
                 parts.append(f"runtime_tokens={runtime_total:.0f}")
+            if provider_total is not None and (
+                runtime_total is None or abs(runtime_total - provider_total) >= 1
+            ):
+                parts.append(f"provider_tokens={provider_total:.0f}")
             if completion is not None:
                 parts.append(f"completion_rate={completion:.0%}")
             if latency is not None:
