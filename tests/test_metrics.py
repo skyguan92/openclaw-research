@@ -133,9 +133,21 @@ def test_cost_tokens_claude_code_v2_lower_than_raw_runtime(claude_code_swe_recor
 # ── cost_usd ────────────────────────────────────────────────────────
 
 
-def test_cost_usd_prefers_reported_value(claude_code_swe_record_v2):
-    """When usage_details.provider_cost_usd is set, use it verbatim."""
-    assert cost_usd(claude_code_swe_record_v2) == 0.0271
+def test_cost_usd_ignores_upstream_reported_for_openclaude(claude_code_swe_record_v2):
+    """openclaude's upstream_reported_cost_usd is Anthropic-priced and
+    must NOT poison the metric — cost_usd should compute from the
+    Kimi-priced breakdown instead."""
+    # 10000 × 0.15 + 1035000 × 0.015 + 9500 × 2.50 = (per-M)
+    expected_usd = (
+        10000 * KIMI_PRICING_PER_M["input"]
+        + 1035000 * KIMI_PRICING_PER_M["cache_read"]
+        + 9500 * KIMI_PRICING_PER_M["output"]
+    ) / 1_000_000
+    result = cost_usd(claude_code_swe_record_v2)
+    assert result is not None
+    assert math.isclose(result, expected_usd, rel_tol=1e-9)
+    # Should be ~$0.04, not the $2.71 reported upstream.
+    assert result < 0.1
 
 
 def test_cost_usd_fallback_uses_kimi_pricing(hermes_swe_record):

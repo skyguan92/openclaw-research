@@ -125,8 +125,9 @@ def claude_code_swe_record_v2():
             "reasoning_tokens": 0,
             "provider_tokens_total": 19500,
             "runtime_tokens_total": 1054500,
-            "provider_cost_usd": 0.0271,
-            "runtime_cost_usd": 0.0271,
+            # openclaude's own costUSD is Anthropic-priced and 100× too
+            # high for Kimi backend — stashed raw, not authoritative.
+            "upstream_reported_cost_usd": 2.71,
             "telemetry_source": "openclaude_model_usage",
         },
     }

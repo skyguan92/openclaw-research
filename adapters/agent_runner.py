@@ -493,7 +493,10 @@ def _run_openclaude_cli(
         cache_write_tokens = _safe_int(usage.get("cacheCreationInputTokens"))
         pure_input_tokens = max(0, total_input - cache_read_tokens - cache_write_tokens)
         tokens_out = _safe_int(usage.get("outputTokens"))
-        cost_usd = float(usage.get("costUSD") or 0)
+        # openclaude 的 costUSD 是按 Anthropic (Sonnet/Opus) 定价估的，在
+        # Kimi-for-coding 后端下高估 ~100 倍，绝不能当作真实成本用。
+        # 保留原始值做 debug，下游 cost_usd() 会回退到 Kimi pricing。
+        upstream_cost_usd = float(usage.get("costUSD") or 0)
         duration_ms = data.get("duration_ms", 0)
         num_turns = data.get("num_turns", 0)
         is_error = bool(data.get("is_error")) or subtype.startswith("error")
@@ -521,8 +524,7 @@ def _run_openclaude_cli(
                     "reasoning_tokens": 0,
                     "provider_tokens_total": provider_tokens_total,
                     "runtime_tokens_total": runtime_tokens_total,
-                    "provider_cost_usd": cost_usd,
-                    "runtime_cost_usd": cost_usd,
+                    "upstream_reported_cost_usd": upstream_cost_usd,
                     "telemetry_source": "openclaude_model_usage",
                 },
             },
