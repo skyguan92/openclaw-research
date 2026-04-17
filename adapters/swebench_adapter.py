@@ -41,6 +41,7 @@ from adapters.instance_pool import (
     load_instance_set,
     list_instance_sets,
 )
+from adapters.run_metadata import build_env_block
 
 PREDICTIONS_DIR = Path(__file__).resolve().parent.parent / "swebench_output"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
@@ -303,6 +304,15 @@ def run_agent_on_instance(
             token_record["notes"] += f", session={result.raw.get('session_id', '')}"
     if runtime_state_dir:
         token_record["runtime_state_dir"] = str(runtime_state_dir)
+
+    token_record["env"] = build_env_block(
+        agent_name=agent_name,
+        model_id=openclaw_model if agent_name == "openclaw" else os.getenv("KIMI_MODEL", "kimi-for-coding"),
+        prompt=prompt,
+        timeout=timeout,
+        mode=mode,
+        runtime_profile=runtime_profile,
+    )
 
     return {"prediction": prediction, "token_record": token_record}
 
