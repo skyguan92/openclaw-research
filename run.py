@@ -29,12 +29,13 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         print("可用命令:")
-        print("  swebench   — SWE-bench Verified 任务成功率评测")
-        print("  memory     — 记忆架构评测")
+        print("  swebench   — SWE-bench Verified 评测（成功率 + token + memory 多轮）")
+        print("  curve      — 多轮 memory 行为曲线分析")
         print("  compare    — 对比分析报告")
         print("  visualize  — 生成图表")
         print("  record     — 手动记录 benchmark 结果")
         print("  smoke      — 快速冒烟测试（验证环境可用）")
+        print("  memory     — (deprecated) MemoryAgentBench quick-test")
         return 0
 
     cmd = sys.argv[1]
@@ -42,7 +43,11 @@ def main():
 
     if cmd == "swebench":
         return _run_child([sys.executable, "-m", "adapters.swebench_adapter"] + rest)
+    elif cmd == "curve":
+        return _run_child([sys.executable, "-m", "analysis.memory_curve"] + rest)
     elif cmd == "memory":
+        print("WARN: `memory` command is deprecated. Memory effects are now measured")
+        print("      as multi-round deltas via `python run.py curve`. See README.")
         return _run_child([sys.executable, "-m", "adapters.memory_adapter"] + rest)
     elif cmd == "compare":
         return _run_child([sys.executable, "analysis/compare.py"] + rest)
