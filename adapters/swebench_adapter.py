@@ -460,6 +460,15 @@ def run_evaluation(preds_file: Path, run_id: str | None = None) -> None:
     saved = import_evaluation_summary(report_file, agent_name=agent_name, run_group=run_id)
     print(f"  已导入 {len(saved)} 条 task_success 记录到 data/raw/")
 
+    from analysis.backfill import backfill_harness_outcomes
+
+    with open(report_file) as f:
+        report_payload = json.load(f)
+    backfilled = backfill_harness_outcomes(
+        report_payload, agent=agent_name, run_group=run_id
+    )
+    print(f"  已在 {len(backfilled)} 条 swe_*.json 上回填 resolved/harness_status")
+
 
 def main():
     parser = argparse.ArgumentParser(description="SWE-bench Adapter")
@@ -555,6 +564,11 @@ def main():
         action="store_true",
         help="不要在第 1 轮前重置隔离 runtime state（默认会清空）",
     )
+    parser.add_argument(
+        "--auto-evaluate",
+        action="store_true",
+        help="每轮 agent 跑完后立即调 SWE-bench harness 评分并回填 resolved",
+    )
     args = parser.parse_args()
 
     # 仅评测模式
@@ -604,7 +618,7 @@ def main():
             print(f"{'='*50}")
             print(f"Agent: {agent_name} (mode={args.mode}, run_id={round_run_group})")
             print(f"{'='*50}")
-            generate_predictions(
+            preds_file = generate_predictions(
                 agent_name,
                 instances,
                 mode=args.mode,
@@ -624,6 +638,11 @@ def main():
                     and not args.keep_runtime_state
                 ),
             )
+            if args.auto_evaluate:
+                try:
+                    run_evaluation(preds_file, round_run_group)
+                except subprocess.CalledProcessError as e:
+                    print(f"  WARN — harness 评测失败（exit={e.returncode}），跳过回填")
 
 
 if __name__ == "__main__":
