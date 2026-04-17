@@ -196,6 +196,13 @@ def run_quick_test(
         else:
             scores = score_retrieval(result.response, test["expected_facts"])
 
+        usage_details = result.raw.get("usage_details")
+        provider_tokens_total = result.tokens_in + result.tokens_out
+        runtime_tokens_total = result.tokens_total
+        if isinstance(usage_details, dict):
+            provider_tokens_total = int(usage_details.get("provider_tokens_total", provider_tokens_total) or provider_tokens_total)
+            runtime_tokens_total = int(usage_details.get("runtime_tokens_total", runtime_tokens_total) or runtime_tokens_total)
+
         record = {
             "run_id": f"mem_{test['id']}_{agent_name}_{run_group}",
             "run_group": run_group,
@@ -209,6 +216,8 @@ def run_quick_test(
                 "tokens_in": result.tokens_in,
                 "tokens_out": result.tokens_out,
                 "tokens_total": result.tokens_total,
+                "provider_tokens_total": provider_tokens_total,
+                "runtime_tokens_total": runtime_tokens_total,
                 "tool_calls_count": result.tool_calls,
                 "latency_s": result.latency_s,
             },
@@ -216,6 +225,8 @@ def run_quick_test(
         }
         if result.error:
             record["error"] = result.error
+        if isinstance(usage_details, dict):
+            record["usage_details"] = usage_details
         results.append(record)
 
         # 保存到 data/raw/

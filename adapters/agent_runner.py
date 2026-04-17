@@ -481,6 +481,9 @@ def _run_openclaude_cli(
         usage = model_usage.get(KIMI_MODEL, {})
         tokens_in = usage.get("inputTokens", 0)
         tokens_out = usage.get("outputTokens", 0)
+        cache_read_tokens = usage.get("cacheReadInputTokens", 0)
+        cache_write_tokens = usage.get("cacheCreationInputTokens", 0)
+        cost_usd = usage.get("costUSD", 0)
         duration_ms = data.get("duration_ms", 0)
         num_turns = data.get("num_turns", 0)
         is_error = bool(data.get("is_error")) or subtype.startswith("error")
@@ -493,7 +496,20 @@ def _run_openclaude_cli(
             tool_calls=max(0, num_turns - 1),  # first turn is the user message
             latency_s=duration_ms / 1000 if duration_ms else latency,
             error=error_text if is_error else None,
-            raw=data,
+            raw={
+                **data,
+                "usage_details": {
+                    "input_tokens": int(tokens_in or 0),
+                    "output_tokens": int(tokens_out or 0),
+                    "cache_read_tokens": int(cache_read_tokens or 0),
+                    "cache_write_tokens": int(cache_write_tokens or 0),
+                    "provider_tokens_total": int((tokens_in or 0) + (tokens_out or 0)),
+                    "runtime_tokens_total": int((tokens_in or 0) + (tokens_out or 0) + (cache_read_tokens or 0) + (cache_write_tokens or 0)),
+                    "provider_cost_usd": float(cost_usd or 0),
+                    "runtime_cost_usd": float(cost_usd or 0),
+                    "telemetry_source": "openclaude_model_usage",
+                },
+            },
         )
     except json.JSONDecodeError:
         return AgentResult(

@@ -24,10 +24,19 @@ from compare import AGENTS, load_data, filter_records, flatten_metrics
 COLORS = {"openclaw": "#4CAF50", "hermes": "#FF9800", "claude-code": "#2196F3"}
 
 
+def _token_column(df):
+    if "provider_tokens_total" in df.columns:
+        return "provider_tokens_total"
+    if "tokens_total" in df.columns:
+        return "tokens_total"
+    return None
+
+
 def plot_radar(df, output_dir: Path) -> None:
     """雷达图：三个 agent 在三个维度的综合表现。"""
     # 归一化各维度到 0-1
     scores = {}
+    token_col = _token_column(df)
     for agent in AGENTS:
         agent_data = df[df["agent"] == agent]
         mem = agent_data[agent_data["dimension"] == "memory"]
@@ -36,7 +45,7 @@ def plot_radar(df, output_dir: Path) -> None:
 
         memory_score = mem["recall_accuracy"].mean() if not mem.empty and "recall_accuracy" in mem else 0
         # Token 效率用倒数归一化（越少越好）
-        token_val = tok["tokens_total"].mean() if not tok.empty and "tokens_total" in tok else 5000
+        token_val = tok[token_col].mean() if not tok.empty and token_col in tok else 5000
         token_score = max(0, 1 - token_val / 5000)
         success_score = (suc["result"] == "pass").mean() if not suc.empty and "result" in suc else 0
 
@@ -73,6 +82,10 @@ def plot_token_bars(df, output_dir: Path) -> None:
     if tok.empty:
         print("  (无 token 数据)")
         return
+    token_col = _token_column(tok)
+    if token_col is None:
+        print("  (无 token 数据)")
+        return
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -85,11 +98,11 @@ def plot_token_bars(df, output_dir: Path) -> None:
         values = []
         for tid in task_ids:
             task_data = agent_data[agent_data["task_id"] == tid]
-            values.append(task_data["tokens_total"].mean() if not task_data.empty else 0)
+            values.append(task_data[token_col].mean() if not task_data.empty else 0)
         ax.bar(x + i * width, values, width, label=agent, color=COLORS[agent])
 
     ax.set_xlabel("任务 ID")
-    ax.set_ylabel("Token 总消耗")
+    ax.set_ylabel("Provider Token 总消耗" if token_col == "provider_tokens_total" else "Token 总消耗")
     ax.set_title("Token 效率对比")
     ax.set_xticks(x + width)
     ax.set_xticklabels(task_ids)

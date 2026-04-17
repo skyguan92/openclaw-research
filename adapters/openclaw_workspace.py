@@ -348,6 +348,10 @@ def _summarize_session_events(events: list[dict]) -> dict:
     response = ""
     tool_calls = 0
     usage = {}
+    tokens_in = 0
+    tokens_out = 0
+    cache_read = 0
+    cache_write = 0
 
     for event in events:
         if event.get("type") != "message":
@@ -358,6 +362,10 @@ def _summarize_session_events(events: list[dict]) -> dict:
 
         if isinstance(message.get("usage"), dict):
             usage = message["usage"]
+            tokens_in += int(usage.get("input", 0) or 0)
+            tokens_out += int(usage.get("output", 0) or 0)
+            cache_read += int(usage.get("cacheRead", 0) or 0)
+            cache_write += int(usage.get("cacheWrite", 0) or 0)
 
         text_parts = []
         for item in message.get("content") or []:
@@ -370,15 +378,16 @@ def _summarize_session_events(events: list[dict]) -> dict:
         if text_parts:
             response = "\n\n".join(part for part in text_parts if part)
 
-    tokens_in = int(usage.get("input", 0) or 0)
-    tokens_out = int(usage.get("output", 0) or 0)
-    tokens_total = int(usage.get("totalTokens", usage.get("total", tokens_in + tokens_out)) or (tokens_in + tokens_out))
+    tokens_total = tokens_in + tokens_out + cache_read + cache_write
     return {
         "response": response,
         "tool_calls": tool_calls,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "tokens_total": tokens_total,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "last_usage": usage,
     }
 
 
@@ -555,12 +564,14 @@ def _run_openclaw_agent(
         ).strip()
     if not response:
         response = session_summary["response"]
-    fallback_in = session_summary["tokens_in"] or int(after_session["meta"].get("inputTokens", 0) or 0)
-    fallback_out = session_summary["tokens_out"] or int(after_session["meta"].get("outputTokens", 0) or 0)
-    fallback_total = session_summary["tokens_total"] or int(after_session["meta"].get("totalTokens", 0) or 0)
-    tokens_in = int(usage.get("input", agent_meta.get("promptTokens", fallback_in)) or fallback_in)
-    tokens_out = int(usage.get("output", fallback_out) or fallback_out)
-    tokens_total = int(usage.get("total", fallback_total or (tokens_in + tokens_out)) or (tokens_in + tokens_out))
+    final_call_in = int(usage.get("input", agent_meta.get("promptTokens", 0)) or 0)
+    final_call_out = int(usage.get("output", 0) or 0)
+    final_call_total = int(usage.get("total", usage.get("totalTokens", final_call_in + final_call_out)) or (final_call_in + final_call_out))
+    tokens_in = session_summary["tokens_in"] or final_call_in or int(after_session["meta"].get("inputTokens", 0) or 0)
+    tokens_out = session_summary["tokens_out"] or final_call_out or int(after_session["meta"].get("outputTokens", 0) or 0)
+    cache_read = session_summary.get("cache_read_tokens", 0)
+    cache_write = session_summary.get("cache_write_tokens", 0)
+    tokens_total = session_summary["tokens_total"] or final_call_total or int(after_session["meta"].get("totalTokens", 0) or (tokens_in + tokens_out + cache_read + cache_write))
     tool_calls = int(meta.get("toolSummary", {}).get("calls", 0) or session_summary["tool_calls"] or 0)
     duration_ms = meta.get("durationMs", 0) or 0
     latency_s = duration_ms / 1000 if duration_ms else elapsed_s
@@ -586,6 +597,18 @@ def _run_openclaw_agent(
             "stderr": stderr,
             "output_parse_error": payload_error,
             "payload": payload,
+            "usage_details": {
+                "input_tokens": tokens_in,
+                "output_tokens": tokens_out,
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
+                "provider_tokens_total": tokens_in + tokens_out,
+                "runtime_tokens_total": tokens_total,
+                "final_call_input_tokens": final_call_in,
+                "final_call_output_tokens": final_call_out,
+                "final_call_total_tokens": final_call_total,
+                "telemetry_source": "openclaw_session_events",
+            },
         },
     )
 

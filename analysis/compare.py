@@ -83,6 +83,20 @@ def flatten_metrics(records: list[dict]) -> pd.DataFrame:
     """将 nested metrics 展平为 DataFrame。"""
     rows = []
     for r in records:
+        usage_details = r.get("usage_details", {})
+        metrics = dict(r.get("metrics", {}))
+        tokens_in = metrics.get("tokens_in", 0) or 0
+        tokens_out = metrics.get("tokens_out", 0) or 0
+        provider_total = metrics.get("provider_tokens_total")
+        if provider_total is None:
+            provider_total = usage_details.get("provider_tokens_total")
+        if provider_total is None:
+            provider_total = (tokens_in or 0) + (tokens_out or 0)
+        runtime_total = metrics.get("runtime_tokens_total")
+        if runtime_total is None:
+            runtime_total = usage_details.get("runtime_tokens_total")
+        if runtime_total is None:
+            runtime_total = metrics.get("tokens_total", provider_total)
         row = {
             "run_id": r["run_id"],
             "run_group": r.get("run_group"),
@@ -93,8 +107,12 @@ def flatten_metrics(records: list[dict]) -> pd.DataFrame:
             "task_id": r["task_id"],
             "dimension": r["dimension"],
             "error": r.get("error"),
+            "provider_tokens_total": provider_total,
+            "runtime_tokens_total": runtime_total,
         }
-        row.update(r.get("metrics", {}))
+        row.update(metrics)
+        if isinstance(usage_details, dict):
+            row.update(usage_details)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -140,12 +158,17 @@ def summarize_tokens(df: pd.DataFrame) -> None:
         agent_data = tok[tok["agent"] == agent]
         if agent_data.empty:
             continue
-        total = _mean_if_present(agent_data, "tokens_total")
+        provider_total = _mean_if_present(agent_data, "provider_tokens_total")
+        runtime_total = _mean_if_present(agent_data, "runtime_tokens_total")
         calls = _mean_if_present(agent_data, "tool_calls_count")
         completion = _mean_if_present(agent_data, "task_completed")
         parts = [f"  {agent:15s}"]
-        if total is not None:
-            parts.append(f"avg_tokens={total:.0f}")
+        if provider_total is not None:
+            parts.append(f"avg_provider_tokens={provider_total:.0f}")
+        if runtime_total is not None and (
+            provider_total is None or abs(runtime_total - provider_total) >= 1
+        ):
+            parts.append(f"avg_runtime_tokens={runtime_total:.0f}")
         if calls is not None:
             parts.append(f"avg_tool_calls={calls:.1f}")
         if completion is not None:
@@ -206,12 +229,17 @@ def summarize_rounds(df: pd.DataFrame) -> None:
             agent_data = round_data[round_data["agent"] == agent]
             if agent_data.empty:
                 continue
-            total = _mean_if_present(agent_data, "tokens_total")
+            provider_total = _mean_if_present(agent_data, "provider_tokens_total")
+            runtime_total = _mean_if_present(agent_data, "runtime_tokens_total")
             completion = _mean_if_present(agent_data, "task_completed")
             latency = _mean_if_present(agent_data, "latency_s")
             parts = [f"    {agent:13s}"]
-            if total is not None:
-                parts.append(f"avg_tokens={total:.0f}")
+            if provider_total is not None:
+                parts.append(f"provider_tokens={provider_total:.0f}")
+            if runtime_total is not None and (
+                provider_total is None or abs(runtime_total - provider_total) >= 1
+            ):
+                parts.append(f"runtime_tokens={runtime_total:.0f}")
             if completion is not None:
                 parts.append(f"completion_rate={completion:.0%}")
             if latency is not None:

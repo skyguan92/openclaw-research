@@ -254,6 +254,13 @@ def run_agent_on_instance(
         "model_patch": patch,
     }
 
+    usage_details = result.raw.get("usage_details")
+    provider_tokens_total = result.tokens_in + result.tokens_out
+    runtime_tokens_total = result.tokens_total
+    if isinstance(usage_details, dict):
+        provider_tokens_total = int(usage_details.get("provider_tokens_total", provider_tokens_total) or provider_tokens_total)
+        runtime_tokens_total = int(usage_details.get("runtime_tokens_total", runtime_tokens_total) or runtime_tokens_total)
+
     # 额外的 token 统计（保存到 data/raw/ 用于分析）
     token_record = {
         "run_id": f"swe_{instance['instance_id']}_{agent_name}_{run_group}",
@@ -266,6 +273,8 @@ def run_agent_on_instance(
             "tokens_in": result.tokens_in,
             "tokens_out": result.tokens_out,
             "tokens_total": result.tokens_total,
+            "provider_tokens_total": provider_tokens_total,
+            "runtime_tokens_total": runtime_tokens_total,
             "task_completed": bool(patch),
             "tool_calls_count": result.tool_calls,
             "latency_s": result.latency_s,
@@ -277,7 +286,6 @@ def run_agent_on_instance(
     token_record["runtime_profile"] = runtime_profile
     if result.error:
         token_record["error"] = result.error
-    usage_details = result.raw.get("usage_details")
     if isinstance(usage_details, dict):
         token_record["usage_details"] = usage_details
     session_ids = result.raw.get("session_ids")
