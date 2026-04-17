@@ -35,3 +35,6 @@ evaluation_results/
 # IDE
 .vscode/
 .idea/
+
+# Git worktrees
+.worktrees/
