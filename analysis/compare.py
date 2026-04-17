@@ -13,6 +13,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from analysis.metrics import provider_tokens, runtime_tokens, tefs
+from analysis.outcome import Outcome, classify
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 
 AGENTS = ["openclaw", "hermes", "claude-code"]
@@ -126,81 +129,114 @@ def _mean_if_present(df: pd.DataFrame, column: str):
     return series.mean()
 
 
-def summarize_memory(df: pd.DataFrame) -> None:
-    """记忆架构维度摘要。"""
-    mem = df[df["dimension"] == "memory"]
-    if mem.empty:
+def summarize_memory(records: list[dict]) -> None:
+    """记忆维度 — 多轮复用时的行为变化（基于 analysis.memory_curve）。"""
+    from analysis.memory_curve import compute_curves
+
+    mem_records = [
+        r for r in records
+        if r.get("runtime_profile") == "memory-enabled" and r.get("round") is not None
+    ]
+    if not mem_records:
+        print("  (无 memory-enabled 多轮数据；用 --runtime-profile memory-enabled --rounds N 采集)")
+        return
+
+    curves = compute_curves(mem_records)
+    for c in curves:
+        print(
+            f"  {c.agent:<12} task={c.task_id:<30} "
+            f"rounds={len(c.rounds)} "
+            f"Δtools={c.delta_tools_r5_r1:+d} "
+            f"Δprov_tok={c.delta_provider_tokens_r5_r1:+d} "
+            f"patch_stable={c.patch_stability:.0%} "
+            f"resolved_rate={c.resolved_rate:.0%}"
+        )
+
+
+def summarize_tokens(records: list[dict]) -> None:
+    """Token 效率维度摘要（走 analysis.metrics 统一口径）。"""
+    tok_records = [r for r in records if r.get("dimension") == "token_efficiency"]
+    if not tok_records:
         print("  (无数据)")
         return
 
+    by_agent: dict[str, list[dict]] = {}
+    for r in tok_records:
+        by_agent.setdefault(r["agent"], []).append(r)
+
     for agent in AGENTS:
-        agent_data = mem[mem["agent"] == agent]
-        if agent_data.empty:
+        rows = by_agent.get(agent)
+        if not rows:
             continue
-        recall = _mean_if_present(agent_data, "recall_accuracy")
-        halluc = _mean_if_present(agent_data, "hallucination_count")
-        parts = [f"  {agent:15s}"]
-        if recall is not None:
-            parts.append(f"recall_accuracy={recall:.2f}")
-        if halluc is not None:
-            parts.append(f"hallucinations={halluc:.1f}")
+        prov = sum(provider_tokens(r) for r in rows) / len(rows)
+        runt = sum(runtime_tokens(r) for r in rows) / len(rows)
+        tool_calls = [
+            (r.get("metrics") or {}).get("tool_calls_count")
+            for r in rows
+            if (r.get("metrics") or {}).get("tool_calls_count") is not None
+        ]
+        avg_tools = (sum(tool_calls) / len(tool_calls)) if tool_calls else None
+
+        resolved_scores = [
+            1.0 if (r.get("metrics") or {}).get("resolved") else 0.0
+            for r in rows
+            if (r.get("metrics") or {}).get("resolved") is not None
+        ]
+        resolved_rate = (sum(resolved_scores) / len(resolved_scores)) if resolved_scores else None
+
+        tefs_values = [
+            tefs(r, score=(r.get("metrics") or {}).get("resolved") and 1.0 or None)
+            for r in rows
+        ]
+        tefs_values = [v for v in tefs_values if v is not None]
+        avg_tefs_resolved = (sum(tefs_values) / len(tefs_values)) if tefs_values else None
+
+        parts = [f"  {agent:15s}",
+                 f"avg_provider_tokens={prov:.0f}"]
+        if abs(runt - prov) >= 1:
+            parts.append(f"avg_runtime_tokens={runt:.0f}")
+        if avg_tools is not None:
+            parts.append(f"avg_tool_calls={avg_tools:.1f}")
+        if resolved_rate is not None:
+            parts.append(f"resolved_rate={resolved_rate:.0%}")
+        if avg_tefs_resolved is not None:
+            parts.append(f"TEFS_resolved={avg_tefs_resolved:.4f}")
         print("  ".join(parts))
 
 
-def summarize_tokens(df: pd.DataFrame) -> None:
-    """Token 效率维度摘要。"""
-    tok = df[df["dimension"] == "token_efficiency"]
-    if tok.empty:
+def summarize_success(records: list[dict]) -> None:
+    """任务成功率 — 基于 analysis.outcome，包含 harness pass 与失败分类。"""
+    suc_records = [
+        r for r in records
+        if r.get("dimension") in ("task_success", "token_efficiency")
+    ]
+    if not suc_records:
         print("  (无数据)")
         return
 
-    for agent in AGENTS:
-        agent_data = tok[tok["agent"] == agent]
-        if agent_data.empty:
-            continue
-        provider_total = _mean_if_present(agent_data, "provider_tokens_total")
-        runtime_total = _mean_if_present(agent_data, "runtime_tokens_total")
-        calls = _mean_if_present(agent_data, "tool_calls_count")
-        completion = _mean_if_present(agent_data, "task_completed")
-        parts = [f"  {agent:15s}"]
-        if provider_total is not None:
-            parts.append(f"avg_provider_tokens={provider_total:.0f}")
-        if runtime_total is not None and (
-            provider_total is None or abs(runtime_total - provider_total) >= 1
-        ):
-            parts.append(f"avg_runtime_tokens={runtime_total:.0f}")
-        if calls is not None:
-            parts.append(f"avg_tool_calls={calls:.1f}")
-        if completion is not None:
-            parts.append(f"completion_rate={completion:.0%}")
-        if len(parts) == 1:
-            parts.append("(无可聚合字段)")
-        print("  ".join(parts))
-
-
-def summarize_success(df: pd.DataFrame) -> None:
-    """任务成功率维度摘要。"""
-    suc = df[df["dimension"] == "task_success"]
-    if suc.empty:
-        print("  (无数据)")
-        return
+    by_agent: dict[str, list[Outcome]] = {}
+    for r in suc_records:
+        by_agent.setdefault(r["agent"], []).append(classify(r))
 
     for agent in AGENTS:
-        agent_data = suc[suc["agent"] == agent]
-        if agent_data.empty:
+        outcomes = by_agent.get(agent)
+        if not outcomes:
             continue
-        parts = [f"  {agent:15s}"]
-        if "result" in agent_data.columns and agent_data["result"].notna().any():
-            pass_rate = (agent_data["result"] == "pass").mean()
-            error_rate = (agent_data["result"] == "error").mean()
-            parts.append(f"pass_rate={pass_rate:.0%}")
-            parts.append(f"error_rate={error_rate:.0%}")
-        quality = _mean_if_present(agent_data, "quality_score")
-        rounds = _mean_if_present(agent_data, "rounds_used")
-        if quality is not None:
-            parts.append(f"quality={quality:.1f}")
-        if rounds is not None:
-            parts.append(f"avg_rounds={rounds:.0f}")
+        total = len(outcomes)
+        counts: dict[Outcome, int] = {}
+        for o in outcomes:
+            counts[o] = counts.get(o, 0) + 1
+        scored = sum(1 for o in outcomes if o in (Outcome.HARNESS_PASSED, Outcome.HARNESS_FAILED))
+        passed = counts.get(Outcome.HARNESS_PASSED, 0)
+        pass_rate = (passed / scored) if scored else None
+
+        parts = [f"  {agent:15s}", f"n={total}"]
+        if pass_rate is not None:
+            parts.append(f"harness_pass_rate={pass_rate:.0%} ({passed}/{scored})")
+        else:
+            parts.append("harness_pass_rate=n/a (no scored records)")
+        details = ", ".join(f"{o.value}={c}" for o, c in sorted(counts.items(), key=lambda kv: kv[0].value))
+        parts.append(f"outcomes=[{details}]")
         print("  ".join(parts))
 
 
@@ -260,8 +296,6 @@ def main():
         print("未找到测试数据。使用 --demo 查看演示输出。")
         sys.exit(1)
 
-    df = flatten_metrics(records)
-
     print("=" * 60)
     print("OpenClaw Research — 对比分析报告")
     print(f"数据来源: {'demo' if args.demo else str(DATA_DIR)}")
@@ -272,20 +306,21 @@ def main():
         print(f"Agent 过滤: {args.agent}")
     print("=" * 60)
 
-    print("\n📊 记忆架构 (Memory)")
+    print("\n📊 记忆架构 (Memory — multi-round behavior)")
     print("-" * 40)
-    summarize_memory(df)
+    summarize_memory(records)
 
     print("\n📊 Token 效率 (Token Efficiency)")
     print("-" * 40)
-    summarize_tokens(df)
+    summarize_tokens(records)
 
-    print("\n📊 任务成功率 (Task Success)")
+    print("\n📊 任务成功率 (Task Success — harness-resolved)")
     print("-" * 40)
-    summarize_success(df)
+    summarize_success(records)
 
     print("\n📊 轮次变化 (Round Progression)")
     print("-" * 40)
+    df = flatten_metrics(records)
     summarize_rounds(df)
 
     print("\n" + "=" * 60)
