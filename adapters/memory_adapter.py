@@ -244,6 +244,11 @@ def run_quick_test(
 
 
 def main():
+    print("╭" + "─" * 68 + "╮")
+    print("│ DEPRECATED: memory_adapter quick-test is no longer the primary     │")
+    print("│ memory dimension. Memory behavior is now measured via multi-round  │")
+    print("│ SWE-bench runs; see `python run.py curve --help`.                  │")
+    print("╰" + "─" * 68 + "╯")
     parser = argparse.ArgumentParser(description="Memory Benchmark Adapter")
     parser.add_argument("--agent", choices=AGENTS + ["all"], required=True)
     parser.add_argument(

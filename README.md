@@ -7,8 +7,10 @@ AI Agent 系统横向对比研究：OpenClaw vs Nous Hermes vs Claude Code
 | 维度 | Benchmark | 来源 |
 |------|-----------|------|
 | **任务成功率** | [SWE-bench Verified](https://github.com/SWE-bench/SWE-bench) (500 题) | Princeton NLP, 业界标准 |
-| **记忆架构** | [MemoryAgentBench](https://github.com/HUST-AI-HYZ/MemoryAgentBench) + 快速测试 | ICLR 2026 |
+| **记忆架构** | 多轮 SWE-bench run（`--runtime-profile memory-enabled --rounds 5`）| Direction B 协议 |
 | **Token 效率** | TEFS 指标 (嵌入 SWE-bench 流程统计) | 借鉴 MCP-Bench |
+
+所有维度共享同一批 SWE-bench 多轮 run；不再单独跑 MemoryAgentBench quick-test。
 
 ## 项目结构
 
@@ -39,8 +41,14 @@ pip install datasets requests pyyaml pandas matplotlib seaborn
 # 2. 冒烟测试（验证环境）
 python run.py smoke
 
-# 3. 跑记忆快速测试（直接调 API，最快验证）
-python run.py memory --agent openclaw --quick-test
+# 3. Phase 1 pilot（20 题，memory-enabled，5 轮）
+python run.py swebench \
+  --agent openclaw \
+  --mode workspace \
+  --limit 20 \
+  --runtime-profile memory-enabled \
+  --rounds 5 \
+  --run-id pilot_mem5
 
 # 4. 跑真实 SWE-bench workspace case
 python run.py swebench --agent openclaw --mode workspace --instance-ids astropy__astropy-12907 --run-id pilot_astropy
@@ -56,18 +64,16 @@ python run.py visualize --output results/
 | 命令 | 做什么 |
 |------|--------|
 | `python run.py smoke` | 冒烟测试（API + 数据集 + Docker） |
-| `python run.py swebench --agent NAME --limit N` | SWE-bench 评测 |
+| `python run.py swebench --agent NAME --limit 20 --runtime-profile memory-enabled --rounds 5 --run-id pilot_mem5` | Phase 1 pilot：20 题 × 5 轮记忆测试 |
 | `python run.py swebench --agent openclaw --mode workspace ...` | OpenClaw 在真实 repo workspace 中改文件 |
 | `python run.py swebench --agent NAME --mode repo-mentioned ...` | 机器上有本地项目目录，但 agent 需要自己发现并进入 |
-| `python run.py swebench ... --timeout 0` | 不设 agent 超时，记录真实总耗时 |
+| `python run.py swebench ... --auto-evaluate` | 跑完自动调用 SWE-bench harness 评测 |
 | `python run.py swebench ... --runtime-profile memory-enabled --rounds 5` | 隔离 state、清空开局 memory、连续观察第 1-5 轮表现 |
 | `python run.py swebench --evaluate FILE` | 评测已有预测文件 |
-| `python run.py memory --agent NAME --quick-test` | 快速记忆测试 |
-| `python run.py memory --agent NAME --generate-config` | 生成 MemoryAgentBench 配置 |
+| `python run.py curve --run-id RUN_ID` | 绘制多轮记忆曲线（Direction B 核心分析） |
 | `python run.py compare` | 统计摘要 |
-| `python run.py compare --demo` | 用 demo 数据演示 |
 | `python run.py visualize --output results/` | 生成图表 |
-| `python run.py record --agent NAME --task ID` | 手动记录结果 |
+| ⚠ `python run.py memory --agent NAME --quick-test` | **已废弃**：MemoryAgentBench quick-test，仅保留作冒烟 |
 
 `--agent` 可选: `openclaw`, `hermes`, `claude-code`, `all`
 

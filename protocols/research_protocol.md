@@ -98,6 +98,15 @@ python run.py swebench \
 - `repo-mentioned`: 用户消息只包含 repo 名加原始 issue 文本，不额外提供本地代码
 - `guided`: 仅允许用于调试 runner，不进入正式结论
 
+## 当前默认实验方案（Direction B）
+
+- **记忆维度不再使用 MemoryAgentBench quick-test**，改为多轮 SWE-bench run
+- 默认实验协议：`--runtime-profile memory-enabled --rounds 5`，5 轮复用同一 state
+- 任务成功率、记忆稳定性、Token 效率三个维度共享同一批 run，无需单独跑记忆 benchmark
+- 记忆曲线分析：`python run.py curve --run-id RUN_ID`，见 `analysis/memory_curve.py`
+- `memory_adapter.py` 保留为可选冒烟工具（`--generate-config` 仍可用），不再是主路径
+- 详见 `protocols/memory_protocol.md`（Direction B 版本）
+
 ## 当前仓库状态
 - OpenClaw 已支持真实 workspace 模式，可直接在本地 git 工作区改文件并导出 patch
 - Memory quick test 适合冒烟，不适合直接作为正式论文结论
