@@ -185,7 +185,7 @@ li { margin-bottom: 0.25em; }
 <h1>三路 Coding Agent Runtime 在 SWE-bench Verified 上的 Token 结构与 Memory 行为对比</h1>
 
 <div class="meta">
-  OpenClaw Research · Direction B Preliminary Report<br>
+  OpenClaw Research · Direction B · Phase 0 Infra Validation + Phase 1 Blueprint<br>
   2026 年 4 月 · mem5_full_20260417_v2 数据集<br>
   <span class="affil">实验标识 <code>mem5_full_20260417_v2</code> · SWE-bench Verified <code>astropy__astropy-12907</code> · 后端 Kimi K2 for coding</span>
 </div>
@@ -206,6 +206,11 @@ claude-code 最省 (245 k) &lt; hermes (263 k) &lt; openclaw (526 k)；
 claude-code 中等 (−33%)，hermes 几乎无效应且出现 R4 外点；
 (4) 发现并修正了 openclaude 自报的 <code>costUSD</code> 字段 —— 它按 Anthropic Sonnet/Opus
 定价估算，对 Kimi 后端高估 ~100 倍，若不纠正会严重污染跨 runtime 成本比较。
+我们把这份数据定位为 <b>Phase 0 基础设施验证</b> —— 它证明度量管道与三种 runtime 的
+<code>runtime_state</code> 持久化机制<b>机制层能跑通</b>，但不足以回答 "memory 对真实
+用户场景的价值" —— 因为所有任务首轮即过 (任务难度饱和)、且 5 轮连续复跑对应
+session 距离 d=0 (真实场景的最特殊情形)。第 6 节据此给出 Phase 1 实验蓝图：
+难题任务池 + session 距离 d ∈ {0,1,3,5,10} 作为核心自变量 + memory-on/off 对照。
 </div>
 
 <!-- ============================================================ -->
@@ -450,24 +455,115 @@ TODO-list / plan-revise 行为相符 —— 它可能每隔几轮会"重新规�
 <h2>5 &nbsp; 局限</h2>
 
 <ol>
-<li><b>单实例</b>。<code>astropy__astropy-12907</code> 是一个难度偏低的 issue，
-所有 agent 首轮就通过。所有结论限于这一道题，特别地 memory 曲线形状
-可能在更复杂的任务上完全不同。</li>
+<li><b>任务难度饱和 — 100% resolved 掩盖了能力差异</b>。
+<code>astropy__astropy-12907</code> 对三个 agent 都算首轮即过的简单题，TEFS 排名
+因此完全退化为 "cost 谁低" 的等价物，无法分离"能力"与"成本"两个维度。
+memory 在此的作用也只限于"让一件本来就能做完的事变得更省"，而不是
+"让一件本来做不完的事能做完"。</li>
+
+<li><b>Session 距离 = 0 — "连续跑 5 轮同任务" 不是真实的 memory 用例</b>。
+真实用户场景是：做一次任务 T → 关掉 session → 中间完成若干其他不相关任务 →
+再做一次 T。agent 对"上次"的感知不是时间间隔，而是"中间发生了多少任务"。
+而本实验所有 5 轮是连续跑的，<b>session 距离 = 0</b>，是实际使用场景的最特殊情形。
+距离非零时（memory 池中有其他任务的噪声），检索/复用难度会显著增加，R1→R5
+的 84% 节省量上限大概率不可达。</li>
+
+<li><b>单任务 — 没有 memory 污染压力测试</b>。5 轮做的是同一个 T，memory 池里
+只有这一个任务相关的条目，检索必然命中。真实场景下 agent 会积累 10 / 50 / 100
+个不同任务的 memory 条目，"同一任务复现时能否从噪声中筛出相关条目"是 memory
+子系统最关键的压力点，本实验没有测到。</li>
+
+<li><b>缺 memory-off 对照组</b>。R1→R5 下降有多少来自 memory 复用、多少来自
+workspace 中 patch 已经存在这种 filesystem 级别的 leak，本实验无法区分。严格归因
+memory 的净贡献必须对照 "每次任务前强制清空 <code>runtime_state/</code>" 的基线。</li>
+
 <li><b>单 seed</b>。hermes 的 R4 外点 (72 tools vs 均值 41) 暗示 run-to-run 方差可能
 很大，未来应做 ≥3 seed 均值 ± 标准差。</li>
-<li><b>串行累积依赖</b>。R5 的表现受 R1 → R4 状态链影响；严格归因 memory 贡献
-需要"每轮 clean start"的对照组 (memory-off baseline)。</li>
-<li><b>任务难度饱和</b>。100% resolved 下 TEFS 排名完全是 cost 排名的等价物，
-无法分离"能力"与"成本"两个维度。</li>
 </ol>
 
-<h2>6 &nbsp; 下一步</h2>
+<h2>6 &nbsp; 下一步：Direction B Phase 1 实验设计</h2>
+
+<p>以上局限直接映射到下一步实验的四个设计变量。方案如下 ——</p>
+
+<h3>6.1 &nbsp; 任务池 — 难题优先</h3>
+<p>从 SWE-bench Verified 中挑 <b>8–10 道首轮通过率 ≤ 50%</b> 的 instance
+(参考 SWE-bench 官方的 "hard" 分桶，或自测筛选)。覆盖 repo 多样性
+(django / sympy / matplotlib / astropy / requests / scikit-learn)。记任务池
+𝒯 = {T₁, ..., T₁₀}。<b>难题是必要条件</b> —— 只有当首轮有真实失败率，
+"memory 让第二次更可能成功" 才是一个非平凡命题。</p>
+
+<h3>6.2 &nbsp; Session 距离作为核心自变量</h3>
+<p>Agent 没有时间感，只有"中间完成了多少任务"的计数感。我们把两次做同一任务
+之间穿插的其他任务数 <b>d</b> 定为核心自变量。典型实验序列片段：</p>
+
+<pre>
+session_1 : 任务 A, 任务 B, ..., T_i (首次)   ← memory 里开始有 T_i 的条目
+session_2 : 任务 X₁                         ← 不相关任务，往 memory 里加噪声
+session_3 : 任务 X₂
+...
+session_{2+d} : 任务 X_d                    ← 共 d 个穿插任务
+session_{3+d} : T_i (复现)                  ← 观察 memory 是否仍被正确检索
+</pre>
+
+<p>每个 session 是<b>独立 subprocess 冷启</b>，只有磁盘上的
+<code>runtime_state/</code> 跨 session 保留。d ∈ {0, 1, 3, 5, 10} 做五组对比 ——
+d 增大意味着同一任务的 memory 条目被更多无关条目"埋得更深"。</p>
+
+<h3>6.3 &nbsp; 对照组：Memory-On vs Memory-Off</h3>
+<table>
+<thead><tr><th>组别</th><th>runtime_state 行为</th><th>解读</th></tr></thead>
+<tbody>
+<tr><td><b>memory-on</b> (treatment)</td><td>跨 session 累积保留；每个任务向 memory 追加条目</td><td>真实 memory 系统</td></tr>
+<tr><td><b>memory-off</b> (control)</td><td>每个 session 开始前清空 <code>runtime_state/</code></td><td>无长期记忆的 baseline</td></tr>
+</tbody>
+</table>
+
+<h3>6.4 &nbsp; 关键输出指标</h3>
+<ul>
+<li><b>Δresolved@d</b> = P(T_i 在距离 d 下复现成功 | on) − P(... | off)。
+正值说明 memory 真的把本来会失败的题救回来了。</li>
+<li><b>Δcost@d</b> = cost_tokens(T_i 复现 | on) / cost_tokens(T_i 复现 | off)。
+小于 1 说明 memory 让同样的成功更便宜。</li>
+<li><b>距离衰减曲线</b>：对每个 runtime 画 Δresolved / Δcost 随 d ∈ {0,1,3,5,10}
+的变化。理想 memory 系统应<b>衰减平缓</b>；若 d=0 时有大效应但 d=5 时跌到 0，
+说明检索机制扛不住噪声。</li>
+<li><b>检索命中率</b> (需对每个 runtime 加埋点)：复现 T_i 时 agent 发起的 memory
+检索次数、其中命中 T_i 首次 session 所写条目的比例。</li>
+</ul>
+
+<h3>6.5 &nbsp; 规模估算</h3>
+<p>10 任务 × (1 首次 + 5 距离 × 2 对照 × 1 复现) = 110 run / runtime。
+3 runtime × 110 = <b>330 run</b>。按当前单任务均值 ~10 min 估算，
+串行约 55 小时；若三 runtime 并行 (不同 Docker 池)，约 19 小时 wall-clock。</p>
+
+<h3>6.6 &nbsp; 工程前置条件</h3>
 <ol>
-<li>扩展到 5 道 SWE-bench 实例 (简单/中等/困难各若干)，保持 3 × 5 = 15 run / 实例。</li>
-<li>加 memory-off 对照组 (每轮清空 state)，量化 memory 净贡献。</li>
-<li>对 hermes 的 R4 spike 做 trace 分析 (是 tool-loop、state 漂移、还是采样噪声)。</li>
-<li>把 <code>upstream_reported_cost_usd</code> vs 后备计算的偏差纳入 CI 检查，
-防止未来加新 runtime 时再次踩 cost 口径的坑。</li>
+<li><b>跨任务 memory 追加语义</b>必须显式验证 —— 当前 mem5_full_v2 里 5 轮都是
+同任务，没有压力测试"不同任务写同一 memory 池会不会互相覆盖"。需读 openclaw /
+hermes / openclaude 三者的 runtime_state 写策略，确认是 append-only 还是按
+task_id 分片。</li>
+<li><b>SWE-bench instance 池 YAML 固化</b>。在 <code>benchmarks/swebench_instances.yaml</code>
+里显式列出 10 道题的 instance_id、预期难度、预期 wall-clock，让实验可复现且可审计。</li>
+<li><b>memory 检索埋点</b>。在 runner 层捕获每次 session 内 agent 读写 memory 的
+时机与 key，落到 <code>usage_details.memory_events</code>。这样才能算 6.4 的
+"检索命中率"。</li>
+<li><b>CI 检查 <code>upstream_reported_cost_usd</code> 偏差</b>。新接入的 runtime
+若自报 cost 与当前后端定价偏差 &gt; 5×，CI 报警，避免再次踩 openclaude 那种
+100× 高估的口径陷阱。</li>
+</ol>
+
+<h3>6.7 &nbsp; 预期发现</h3>
+<p>基于 mem5_full_v2 的机制层观察，对 Phase 1 的<b>可证伪假设</b>：</p>
+<ol>
+<li>在难题上，memory-on 相对 memory-off 应该给三个 runtime 都带来
+Δresolved &gt; 0（memory 真的有用）；若不成立，说明我们的 memory 层
+只是"省了 token 没省实质工作量"，要重新审视 runtime_state 写什么。</li>
+<li>距离衰减：openclaude 的 memory 基于 Markdown 文件 + grep，理论上对距离
+不敏感；openclaw 的 memory 依赖工作笔记，长距离下可能失效；hermes 的 state.db
+有结构化查询能力，应介于两者之间。我们预计排序是 openclaude &gt; hermes &gt; openclaw
+在 d=10 时仍能保持 Δresolved &gt; 0。</li>
+<li>hermes 的单轮方差应该在多 seed 下收敛，R4 外点不应该在 Phase 1 重现；
+若重现，说明 hermes 有结构性 bug，不是采样噪声。</li>
 </ol>
 
 <!-- ============================================================ -->
@@ -479,8 +575,14 @@ TODO-list / plan-revise 行为相符 —— 它可能每隔几轮会"重新规�
 openclaw 最贵 (526 k)；<b>memory 复用给 openclaw 带来 84% 的工具调用降幅</b>，
 是三者中最强的 memory 信号，原因是它不被 provider-cache 遮蔽。
 同时，我们锁定并修正了 openclaude 自报 <code>costUSD</code> 按 Anthropic 定价估算、
-对 Kimi 后端高估 ~100 倍的计量陷阱。下一步将扩到多实例 + memory-off 对照组，
-把本报告中的单实例现象升级为统计意义上的发现。</p>
+对 Kimi 后端高估 ~100 倍的计量陷阱。</p>
+<p>但这份数据的定位应当<b>诚实地</b>限定在 "Phase 0 基础设施验证" —— 它证明了
+度量管道能跑通、三种 runtime 的 state 持久化机制在机制层都工作。它<b>不</b>足以
+回答 "memory 对真实用户体验的价值" ：(a) 本次 100% resolved 使任务成功率
+退化为不可区分维度；(b) 5 轮连续同任务对应 session 距离 d=0，是真实使用场景
+的最特殊情形。第 6 节提出的 Phase 1 实验 —— 难题任务池 + session 距离
+d ∈ {0,1,3,5,10} + memory-on/off 对照 —— 才是对 Direction B 命题的正面回答，
+这份 Phase 0 报告是它的前置条件而非结论。</p>
 
 <!-- ============================================================ -->
 <h2>附录 A &nbsp; 逐轮完整数据</h2>
