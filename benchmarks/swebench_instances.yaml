@@ -1,0 +1,36 @@
+# SWE-bench Verified instance pools for comparative experiments.
+#
+# phase1: 20 instances stratified across 7 repos (astropy, django, matplotlib,
+#         pytest-dev, scikit-learn, sphinx-doc, sympy). Picked for mix of
+#         difficulty with at least 1 known-resolvable instance (astropy-12907).
+# pilot:  single known-working instance for smoke testing the full pipeline.
+
+sets:
+  pilot:
+    description: Single-instance smoke test
+    instance_ids:
+      - astropy__astropy-12907
+
+  phase1:
+    description: 20-instance stratified Phase-1 pool (7 repos)
+    instance_ids:
+      - astropy__astropy-12907
+      - astropy__astropy-13033
+      - astropy__astropy-14096
+      - django__django-11099
+      - django__django-11138
+      - django__django-13212
+      - django__django-14311
+      - django__django-15741
+      - matplotlib__matplotlib-22719
+      - matplotlib__matplotlib-23299
+      - matplotlib__matplotlib-25332
+      - pytest-dev__pytest-5262
+      - pytest-dev__pytest-7324
+      - scikit-learn__scikit-learn-10844
+      - scikit-learn__scikit-learn-13142
+      - scikit-learn__scikit-learn-14496
+      - sphinx-doc__sphinx-7454
+      - sphinx-doc__sphinx-8551
+      - sympy__sympy-13647
+      - sympy__sympy-21379

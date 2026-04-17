@@ -35,6 +35,12 @@ from adapters.openclaw_workspace import (
     run_openclaw_workspace,
 )
 from adapters.runtime_state import DEFAULT_RUNTIME_STATE_ROOT, prepare_runtime_state
+from adapters.instance_pool import (
+    InstanceSet,
+    UnknownInstanceSetError,
+    load_instance_set,
+    list_instance_sets,
+)
 
 PREDICTIONS_DIR = Path(__file__).resolve().parent.parent / "swebench_output"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
@@ -466,13 +472,18 @@ def main():
         "--limit",
         type=int,
         default=None,
-        help="只跑前 N 个 instance",
+        help="只跑前 N 个 instance（会在 --instance-set / --instance-ids 之后再截断）",
     )
     parser.add_argument(
         "--instance-ids",
         nargs="+",
         default=None,
-        help="指定 instance ID",
+        help="显式列出 instance ID（覆盖 --instance-set）",
+    )
+    parser.add_argument(
+        "--instance-set",
+        default=None,
+        help=f"使用预声明的 instance 池（{', '.join(list_instance_sets())}）",
     )
     parser.add_argument(
         "--dataset",
@@ -562,9 +573,17 @@ def main():
 
     # 加载数据
     print("加载 SWE-bench 数据集...")
+    resolved_ids: list[str] | None = args.instance_ids
+    if resolved_ids is None and args.instance_set:
+        try:
+            pool = load_instance_set(args.instance_set)
+        except UnknownInstanceSetError as e:
+            raise SystemExit(str(e))
+        resolved_ids = list(pool.instance_ids)
+        print(f"  instance_set={pool.name} ({pool.description}), n={len(resolved_ids)}")
     instances = load_instances(
         dataset_name=args.dataset,
-        instance_ids=args.instance_ids,
+        instance_ids=resolved_ids,
         limit=args.limit,
     )
     print(f"  共 {len(instances)} 个 instance\n")
