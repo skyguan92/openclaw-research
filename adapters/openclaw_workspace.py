@@ -15,6 +15,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import requests
+
 from adapters.agent_runner import AgentResult
 from adapters.runtime_state import build_runtime_env, resolve_openclaw_state_dir
 
@@ -36,6 +38,12 @@ OPENCLAW_IGNORED_PATH_PREFIXES = {
     ".openclaw",
     "memory",
 }
+KIMI_TOOL_CALLS_SECTION_BEGIN = "<|tool_calls_section_begin|>"
+KIMI_TOOL_CALLS_SECTION_END = "<|tool_calls_section_end|>"
+KIMI_TOOL_CALL_BEGIN = "<|tool_call_begin|>"
+KIMI_TOOL_CALL_ARGUMENT_BEGIN = "<|tool_call_argument_begin|>"
+KIMI_TOOL_CALL_END = "<|tool_call_end|>"
+KIMI_COUNT_TOKENS_OVERHEAD = 4
 
 
 def _run(
@@ -85,6 +93,122 @@ def _approx_token_count(text: str) -> int:
     if not stripped:
         return 0
     return max(1, (len(stripped) + 3) // 4)
+
+
+def _resolve_kimi_count_tokens_url() -> str:
+    base = os.getenv("KIMI_BASE_URL", "https://api.kimi.com/coding/v1").rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    return f"{base}/messages/count_tokens"
+
+
+def _encode_kimi_assistant_content(content: list[dict]) -> list[dict]:
+    """Re-encode OpenClaw session blocks into the text blocks Kimi count_tokens accepts."""
+    blocks: list[dict] = []
+    pending_tool_calls: list[dict] = []
+
+    def flush_tool_calls() -> None:
+        if not pending_tool_calls:
+            return
+
+        pieces: list[str] = []
+        for item in pending_tool_calls:
+            raw_id = str(item.get("id") or item.get("name") or "").strip()
+            if not raw_id:
+                continue
+            arguments = item.get("arguments", item.get("input", item.get("args"))) or {}
+            try:
+                args_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+            except TypeError:
+                args_json = json.dumps(str(arguments), ensure_ascii=False)
+            pieces.append(
+                f"{KIMI_TOOL_CALL_BEGIN}{raw_id}"
+                f"{KIMI_TOOL_CALL_ARGUMENT_BEGIN}{args_json}"
+                f"{KIMI_TOOL_CALL_END}"
+            )
+
+        pending_tool_calls.clear()
+        if not pieces:
+            return
+        blocks.append(
+            {
+                "type": "text",
+                "text": (
+                    f"{KIMI_TOOL_CALLS_SECTION_BEGIN}"
+                    f"{''.join(pieces)}"
+                    f"{KIMI_TOOL_CALLS_SECTION_END}"
+                ),
+            }
+        )
+
+    for item in content or []:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "toolCall":
+            pending_tool_calls.append(item)
+            continue
+
+        flush_tool_calls()
+        if item_type == "text" and item.get("text"):
+            blocks.append({"type": "text", "text": str(item["text"])})
+
+    flush_tool_calls()
+    return blocks
+
+
+def _count_kimi_output_tokens(
+    content: list[dict],
+    *,
+    model: str,
+    session: requests.Session,
+    cache: dict[str, int],
+) -> int | None:
+    """Estimate Kimi output tokens via count_tokens on the re-encoded assistant content.
+
+    Kimi's Anthropic-compatible streaming telemetry reports `output_tokens=0` on
+    OpenClaw's native path. The count_tokens endpoint adds a small assistant
+    message wrapper overhead, which calibrates to ~4 tokens for this provider.
+    """
+    api_key = os.getenv("KIMI_API_KEY", "")
+    if not api_key:
+        return None
+
+    encoded = _encode_kimi_assistant_content(content)
+    if not encoded:
+        return 0
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "assistant", "content": encoded}],
+    }
+    cache_key = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if cache_key in cache:
+        return cache[cache_key]
+
+    try:
+        resp = session.post(
+            _resolve_kimi_count_tokens_url(),
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+                "user-agent": "claude-code/0.1.0",
+                "content-type": "application/json",
+                "accept": "application/json",
+                "anthropic-dangerous-direct-browser-access": "true",
+            },
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw_tokens = int(data.get("input_tokens", 0) or 0)
+        calibrated = max(0, raw_tokens - KIMI_COUNT_TOKENS_OVERHEAD)
+        cache[cache_key] = calibrated
+        return calibrated
+    except Exception:
+        return None
 
 
 def _agent_id(run_group: str, instance_id: str) -> str:
@@ -362,7 +486,12 @@ def _summarize_session_events(events: list[dict]) -> dict:
     reported_tokens_out = 0
     cache_read = 0
     cache_write = 0
-    estimated_tokens_out = 0
+    calibrated_tokens_out = 0
+    approx_tokens_out = 0
+    count_tokens_calls = 0
+    count_tokens_hits = 0
+    kimi_count_session: requests.Session | None = None
+    kimi_count_cache: dict[str, int] = {}
 
     for event in events:
         if event.get("type") != "message":
@@ -374,9 +503,12 @@ def _summarize_session_events(events: list[dict]) -> dict:
         if isinstance(message.get("usage"), dict):
             usage = message["usage"]
             tokens_in += int(usage.get("input", 0) or 0)
-            reported_tokens_out += int(usage.get("output", 0) or 0)
+            message_reported_out = int(usage.get("output", 0) or 0)
+            reported_tokens_out += message_reported_out
             cache_read += int(usage.get("cacheRead", 0) or 0)
             cache_write += int(usage.get("cacheWrite", 0) or 0)
+        else:
+            message_reported_out = 0
 
         output_parts: list[str] = []
         text_parts = []
@@ -402,10 +534,44 @@ def _summarize_session_events(events: list[dict]) -> dict:
                 output_parts.append(item["text"])
         if text_parts:
             response = "\n\n".join(part for part in text_parts if part)
-        if output_parts:
-            estimated_tokens_out += _approx_token_count("\n".join(output_parts))
+        message_approx_out = _approx_token_count("\n".join(output_parts)) if output_parts else 0
+        approx_tokens_out += message_approx_out
 
-    effective_tokens_out = reported_tokens_out or estimated_tokens_out
+        message_calibrated_out = 0
+        if (
+            message_reported_out == 0
+            and message.get("provider") == "kimi"
+            and message.get("api") == "anthropic-messages"
+            and isinstance(message.get("content"), list)
+        ):
+            if kimi_count_session is None:
+                kimi_count_session = requests.Session()
+                kimi_count_session.trust_env = False
+            cache_key = json.dumps(
+                _encode_kimi_assistant_content(message["content"]),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if cache_key in kimi_count_cache:
+                count_tokens_hits += 1
+                counted = kimi_count_cache[cache_key]
+            else:
+                count_tokens_calls += 1
+                counted = _count_kimi_output_tokens(
+                    message["content"],
+                    model=str(message.get("model") or "kimi-for-coding"),
+                    session=kimi_count_session,
+                    cache=kimi_count_cache,
+                )
+            if counted is not None:
+                message_calibrated_out = counted
+
+        calibrated_tokens_out += message_calibrated_out
+
+    estimated_tokens_out = calibrated_tokens_out or approx_tokens_out
+    effective_tokens_out = reported_tokens_out + calibrated_tokens_out
+    if reported_tokens_out == 0 and calibrated_tokens_out == 0:
+        effective_tokens_out = approx_tokens_out
     reported_tokens_total = tokens_in + reported_tokens_out + cache_read + cache_write
     effective_tokens_total = tokens_in + effective_tokens_out + cache_read + cache_write
     return {
@@ -415,11 +581,15 @@ def _summarize_session_events(events: list[dict]) -> dict:
         "tokens_out": effective_tokens_out,
         "reported_tokens_out": reported_tokens_out,
         "estimated_tokens_out": estimated_tokens_out,
+        "counted_tokens_out": calibrated_tokens_out,
+        "approx_tokens_out": approx_tokens_out,
         "tokens_total": effective_tokens_total,
         "reported_tokens_total": reported_tokens_total,
         "effective_tokens_total": effective_tokens_total,
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
+        "count_tokens_calls": count_tokens_calls,
+        "count_tokens_cache_hits": count_tokens_hits,
         "last_usage": usage,
     }
 
@@ -607,6 +777,8 @@ def _run_openclaw_agent(
         or int(after_session["meta"].get("outputTokens", 0) or 0)
     )
     estimated_tokens_out = session_summary.get("estimated_tokens_out", 0)
+    counted_tokens_out = session_summary.get("counted_tokens_out", 0)
+    approx_tokens_out = session_summary.get("approx_tokens_out", 0)
     tokens_out = reported_tokens_out or estimated_tokens_out
     cache_read = session_summary.get("cache_read_tokens", 0)
     cache_write = session_summary.get("cache_write_tokens", 0)
@@ -648,11 +820,17 @@ def _run_openclaw_agent(
                 "output_tokens": tokens_out,
                 "output_tokens_reported": reported_tokens_out,
                 "output_tokens_estimated": estimated_tokens_out,
+                "output_tokens_counted": counted_tokens_out,
+                "output_tokens_approx": approx_tokens_out,
                 "output_tokens_source": (
                     "reported"
                     if reported_tokens_out > 0
+                    else "count_tokens_calibrated"
+                    if counted_tokens_out > 0 and estimated_tokens_out == counted_tokens_out
+                    else "count_tokens_calibrated_with_approx_fallback"
+                    if counted_tokens_out > 0
                     else "estimated_from_session_content"
-                    if estimated_tokens_out > 0
+                    if approx_tokens_out > 0
                     else "missing"
                 ),
                 "cache_read_tokens": cache_read,
@@ -664,7 +842,13 @@ def _run_openclaw_agent(
                 "final_call_input_tokens": final_call_in,
                 "final_call_output_tokens": final_call_out,
                 "final_call_total_tokens": final_call_total,
-                "output_tokens_estimation_method": "approx_chars_div_4_from_text_and_tool_calls",
+                "count_tokens_calls": session_summary.get("count_tokens_calls", 0),
+                "count_tokens_cache_hits": session_summary.get("count_tokens_cache_hits", 0),
+                "output_tokens_estimation_method": (
+                    "kimi_messages_count_tokens_minus_4_on_reencoded_assistant_content"
+                    if counted_tokens_out > 0
+                    else "approx_chars_div_4_from_text_and_tool_calls"
+                ),
                 "telemetry_source": "openclaw_session_events",
             },
         },

@@ -133,12 +133,17 @@ def _seed_openclaw_state(state_dir: Path) -> None:
                                 "id": kimi_model,
                                 "name": kimi_model,
                                 "contextWindow": 262144,
+                                "compat": {
+                                    "supportsUsageInStreaming": True,
+                                },
                             }
                         ],
                     }
                 },
             },
         }
+
+    _enable_openclaw_kimi_stream_usage(config)
 
     # Preserve provider/auth config but always start from a clean agent registry.
     config["agents"] = {"list": [{"id": "main"}]}
@@ -150,6 +155,43 @@ def _seed_openclaw_state(state_dir: Path) -> None:
 
     (state_dir / "workspace").mkdir(parents=True, exist_ok=True)
     (state_dir / "memory").mkdir(parents=True, exist_ok=True)
+
+
+def _enable_openclaw_kimi_stream_usage(config: dict) -> None:
+    """Force usage-in-streaming compat for isolated Kimi provider configs.
+
+    Kimi's OpenAI-compatible endpoint supports `stream_options.include_usage`,
+    but OpenClaw's auto-detection disables it for custom base URLs unless the
+    model compat explicitly opts in. This only affects telemetry collection.
+    """
+    models_cfg = config.get("models")
+    if not isinstance(models_cfg, dict):
+        return
+    providers = models_cfg.get("providers")
+    if not isinstance(providers, dict):
+        return
+
+    for provider_id, provider_cfg in providers.items():
+        if not isinstance(provider_cfg, dict):
+            continue
+        provider_name = str(provider_id or "").strip().lower()
+        base_url = str(provider_cfg.get("baseUrl") or "").strip().lower()
+        is_kimi_provider = provider_name == "kimi" or "api.kimi.com" in base_url
+        if not is_kimi_provider:
+            continue
+
+        models = provider_cfg.get("models")
+        if not isinstance(models, list):
+            continue
+
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            compat = model.get("compat")
+            if not isinstance(compat, dict):
+                compat = {}
+                model["compat"] = compat
+            compat["supportsUsageInStreaming"] = True
 
 
 def _seed_hermes_home(state_dir: Path) -> None:
