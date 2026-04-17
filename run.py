@@ -50,9 +50,9 @@ def main():
         print("      as multi-round deltas via `python run.py curve`. See README.")
         return _run_child([sys.executable, "-m", "adapters.memory_adapter"] + rest)
     elif cmd == "compare":
-        return _run_child([sys.executable, "analysis/compare.py"] + rest)
+        return _run_child([sys.executable, "-m", "analysis.compare"] + rest)
     elif cmd == "visualize":
-        return _run_child([sys.executable, "analysis/visualize.py"] + rest)
+        return _run_child([sys.executable, "-m", "analysis.visualize"] + rest)
     elif cmd == "record":
         return _run_child([sys.executable, "scripts/run_benchmark.py"] + rest)
     elif cmd == "smoke":
