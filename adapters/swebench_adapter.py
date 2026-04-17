@@ -653,6 +653,8 @@ def main():
                     run_evaluation(preds_file, round_run_group)
                 except subprocess.CalledProcessError as e:
                     print(f"  WARN — harness 评测失败（exit={e.returncode}），跳过回填")
+                except (FileNotFoundError, OSError) as e:
+                    print(f"  WARN — harness 评测无法启动（{e}），跳过回填")
 
 
 if __name__ == "__main__":
