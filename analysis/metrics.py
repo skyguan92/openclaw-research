@@ -184,13 +184,20 @@ def tefs(
     score: Optional[float],
     basis: Basis = "provider",
 ) -> Optional[float]:
-    """Token Efficiency Function Score = score / (tokens / 1000).
+    """Token Efficiency Function Score.
+
+    Unit varies by basis — DO NOT compare values across bases:
+      - provider    → score per 1k billable tokens
+      - runtime     → score per 1k runtime tokens (includes cache)
+      - cost_tokens → score per 1k equivalent-input tokens (provider-agnostic)
+      - cost_usd    → score per USD (different dimension; use for
+                      dollar-level efficiency only, never mix with others)
 
     Returns None when TEFS is undefined:
       - score is None (harness has not scored this record yet)
       - score is 0   (avoids conflating "expensive but close to passing"
                       with "cheap and wildly wrong")
-      - tokens are 0
+      - tokens/cost are 0 or unknown
     """
     if basis not in ("provider", "runtime", "cost_tokens", "cost_usd"):
         raise ValueError(
@@ -205,7 +212,7 @@ def tefs(
         denom = float(runtime_tokens(record))
     elif basis == "cost_tokens":
         denom = cost_tokens(record)
-    else:  # cost_usd
+    else:  # cost_usd — units are score/$, NOT score/k-tokens
         dollars = cost_usd(record)
         if dollars is None or dollars <= 0:
             return None

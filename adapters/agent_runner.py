@@ -480,8 +480,14 @@ def _run_openclaude_cli(
         # openclaude 的 modelUsage.inputTokens 包含 cacheReadInputTokens 和
         # cacheCreationInputTokens（Claude Code / Anthropic SDK 惯例），所以
         # 需要减掉才是"纯非缓存 input"，否则 runtime 口径会双算 cache。
-        model_usage = data.get("modelUsage", {})
-        usage = model_usage.get(KIMI_MODEL, {})
+        model_usage = data.get("modelUsage") or {}
+        usage = model_usage.get(KIMI_MODEL)
+        if not usage and len(model_usage) == 1:
+            # Fallback: model name mismatch (e.g. KIMI_MODEL env differs from
+            # what openclaude reports). Trust the sole entry rather than
+            # silently returning zeros.
+            usage = next(iter(model_usage.values()))
+        usage = usage or {}
         total_input = _safe_int(usage.get("inputTokens"))
         cache_read_tokens = _safe_int(usage.get("cacheReadInputTokens"))
         cache_write_tokens = _safe_int(usage.get("cacheCreationInputTokens"))
