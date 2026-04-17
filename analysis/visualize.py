@@ -24,6 +24,16 @@ from analysis.compare import AGENTS, load_data, filter_records, flatten_metrics
 
 COLORS = {"openclaw": "#4CAF50", "hermes": "#FF9800", "claude-code": "#2196F3"}
 
+# Five components of token_breakdown, in stacking order bottom → top.
+# Cache tiers share a hue; output/reasoning get distinct colors.
+BREAKDOWN_LAYERS = [
+    ("pure_input_tokens",  "input (计费)",    "#78909C"),
+    ("cache_read_tokens",  "cache_read (0.1×)", "#B0BEC5"),
+    ("cache_write_tokens", "cache_write (1.25×)", "#D7CCC8"),
+    ("output_tokens",      "output (3×)",       "#EF5350"),
+    ("reasoning_tokens",   "reasoning (3×)",    "#AB47BC"),
+]
+
 
 def _agent_values(df, column):
     """Mean of `column` per agent, as a list ordered by AGENTS."""
@@ -34,50 +44,92 @@ def _agent_values(df, column):
 
 
 def plot_token_bars(df, output_dir: Path) -> None:
-    """分组柱状图：每个 agent 同时显示 runtime_tokens 与 provider_tokens。
+    """Stacked bar：每个 agent 按 token 类别分层展示。
 
-    runtime_tokens 是三者可比口径（包含 cache_read）；
-    provider_tokens 是计费口径。
-    两者差距只有 hermes 显著（因为只有它独立追踪 cache_read）。
+    五个分层（从底到顶）：pure_input / cache_read / cache_write / output / reasoning。
+    不同类别的计费权重不同（标签上标注了相对权重），肉眼能直接看出
+    openclaw 的 input-heavy / hermes 的 cache-heavy / claude-code 的哪种结构。
     """
     tok = df[df["dimension"] == "token_efficiency"]
     if tok.empty:
         print("  (无 token 数据)")
         return
 
-    runtime_vals = _agent_values(tok, "runtime_tokens_total")
-    provider_vals = _agent_values(tok, "provider_tokens_total")
-
-    if all(np.isnan(v) for v in runtime_vals) and all(np.isnan(v) for v in provider_vals):
-        print("  (无 token 数据)")
-        return
+    agent_means = {
+        agent: {col: (tok[tok["agent"] == agent][col].dropna().mean() if col in tok.columns else 0.0)
+                for col, _, _ in BREAKDOWN_LAYERS}
+        for agent in AGENTS
+    }
 
     x = np.arange(len(AGENTS))
-    width = 0.38
-
+    width = 0.55
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    ax.bar(x - width / 2, runtime_vals, width, label="runtime_tokens (含 cache_read)",
-           color=[COLORS[a] for a in AGENTS])
-    ax.bar(x + width / 2, provider_vals, width, label="provider_tokens (计费)",
-           color=[COLORS[a] for a in AGENTS], alpha=0.45, edgecolor="black", linewidth=0.5)
 
-    for i, (r, p) in enumerate(zip(runtime_vals, provider_vals)):
-        if not np.isnan(r):
-            ax.text(i - width / 2, r, f"{r:,.0f}", ha="center", va="bottom", fontsize=8)
-        if not np.isnan(p):
-            ax.text(i + width / 2, p, f"{p:,.0f}", ha="center", va="bottom", fontsize=8)
+    bottom = np.zeros(len(AGENTS))
+    for col, label, color in BREAKDOWN_LAYERS:
+        values = np.array([agent_means[a][col] or 0.0 for a in AGENTS])
+        ax.bar(x, values, width, bottom=bottom, label=label, color=color,
+               edgecolor="white", linewidth=0.6)
+        bottom += values
+
+    for i, total in enumerate(bottom):
+        if total > 0:
+            ax.text(i, total, f"{total:,.0f}", ha="center", va="bottom", fontsize=9)
 
     ax.set_xticks(x)
     ax.set_xticklabels(AGENTS)
     ax.set_ylabel("平均 tokens / run")
-    ax.set_title("Token 口径对比（apples-to-apples vs 计费视角）")
-    ax.legend(loc="upper right")
+    ax.set_title("Token 结构分解（按类别堆叠；括号为相对计费权重）")
+    ax.legend(loc="upper right", fontsize=8)
     ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_dir / "token_comparison.png", dpi=150)
+    plt.savefig(output_dir / "token_breakdown.png", dpi=150)
     plt.close()
-    print("  ✓ token_comparison.png")
+    print("  ✓ token_breakdown.png")
+
+
+def plot_cost_comparison(df, output_dir: Path) -> None:
+    """并排柱状图：cost_tokens（provider 无关口径）vs cost_usd（Kimi 定价）。
+
+    cost_tokens = 各类 token 加权求和（等价 input-token 数），跨 provider 口径稳定。
+    cost_usd    = 按 Kimi-for-coding 定价折算真美元 —— 便于 sanity check。
+    """
+    tok = df[df["dimension"] == "token_efficiency"]
+    if tok.empty:
+        print("  (无 cost 数据)")
+        return
+
+    ct_vals = _agent_values(tok, "cost_tokens")
+    usd_vals = _agent_values(tok, "cost_usd")
+
+    fig, (ax_tok, ax_usd) = plt.subplots(1, 2, figsize=(12, 5))
+
+    bars_tok = ax_tok.bar(AGENTS, ct_vals, color=[COLORS[a] for a in AGENTS],
+                          edgecolor="black", linewidth=0.5)
+    ax_tok.set_title("cost_tokens（等价 input-token 数）")
+    ax_tok.set_ylabel("equivalent input tokens / run")
+    ax_tok.grid(axis="y", alpha=0.3)
+    for bar, v in zip(bars_tok, ct_vals):
+        if not np.isnan(v):
+            ax_tok.text(bar.get_x() + bar.get_width() / 2, v, f"{v:,.0f}",
+                        ha="center", va="bottom", fontsize=9)
+
+    bars_usd = ax_usd.bar(AGENTS, usd_vals, color=[COLORS[a] for a in AGENTS],
+                          edgecolor="black", linewidth=0.5)
+    ax_usd.set_title("cost_usd（Kimi-for-coding 定价）")
+    ax_usd.set_ylabel("USD / run")
+    ax_usd.grid(axis="y", alpha=0.3)
+    for bar, v in zip(bars_usd, usd_vals):
+        if not np.isnan(v):
+            ax_usd.text(bar.get_x() + bar.get_width() / 2, v, f"${v:.3f}",
+                        ha="center", va="bottom", fontsize=9)
+
+    fig.suptitle("成本对比：provider-agnostic vs real-dollar", fontsize=13)
+    plt.tight_layout()
+    plt.savefig(output_dir / "cost_comparison.png", dpi=150)
+    plt.close()
+    print("  ✓ cost_comparison.png")
 
 
 def plot_memory_curve(df, output_dir: Path) -> None:
@@ -93,7 +145,7 @@ def plot_memory_curve(df, output_dir: Path) -> None:
         print("  (少于 2 轮，跳过 memory curve)")
         return
 
-    fig, (ax_tools, ax_tokens) = plt.subplots(1, 2, figsize=(13, 5))
+    fig, (ax_tools, ax_cost) = plt.subplots(1, 2, figsize=(13, 5))
 
     for agent in AGENTS:
         agent_data = tok[tok["agent"] == agent]
@@ -102,11 +154,11 @@ def plot_memory_curve(df, output_dir: Path) -> None:
 
         tools_by_round = [agent_data[agent_data["round"] == r]["tool_calls_count"].mean()
                           for r in rounds]
-        tokens_by_round = [agent_data[agent_data["round"] == r]["runtime_tokens_total"].mean()
-                           for r in rounds]
+        cost_by_round = [agent_data[agent_data["round"] == r]["cost_tokens"].mean()
+                         for r in rounds]
 
         ax_tools.plot(rounds, tools_by_round, "o-", label=agent, color=COLORS[agent], linewidth=2)
-        ax_tokens.plot(rounds, tokens_by_round, "o-", label=agent, color=COLORS[agent], linewidth=2)
+        ax_cost.plot(rounds, cost_by_round, "o-", label=agent, color=COLORS[agent], linewidth=2)
 
     ax_tools.set_xlabel("Round (复用同一 runtime state)")
     ax_tools.set_ylabel("tool_calls / round")
@@ -115,12 +167,12 @@ def plot_memory_curve(df, output_dir: Path) -> None:
     ax_tools.grid(alpha=0.3)
     ax_tools.legend()
 
-    ax_tokens.set_xlabel("Round (复用同一 runtime state)")
-    ax_tokens.set_ylabel("runtime_tokens / round")
-    ax_tokens.set_title("多轮 token 消耗曲线")
-    ax_tokens.set_xticks(rounds)
-    ax_tokens.grid(alpha=0.3)
-    ax_tokens.legend()
+    ax_cost.set_xlabel("Round (复用同一 runtime state)")
+    ax_cost.set_ylabel("cost_tokens / round")
+    ax_cost.set_title("多轮成本曲线（等价 input-token 数）")
+    ax_cost.set_xticks(rounds)
+    ax_cost.grid(alpha=0.3)
+    ax_cost.legend()
 
     fig.suptitle("Memory 行为曲线（第 1 轮前清空 state，之后复用）", fontsize=13)
     plt.tight_layout()
@@ -202,6 +254,7 @@ def main():
 
     print("生成图表中...")
     plot_token_bars(df, output_dir)
+    plot_cost_comparison(df, output_dir)
     plot_memory_curve(df, output_dir)
     plot_resolved_heatmap(df, output_dir)
     print(f"\n所有图表已保存到 {output_dir}/")

@@ -72,7 +72,7 @@ def hermes_swe_record():
 
 @pytest.fixture
 def claude_code_swe_record():
-    """Representative claude-code record (cache tracked but excluded from tokens_total)."""
+    """Legacy claude-code record (pre-usage_details era): no breakdown, metrics fallback."""
     return {
         "run_id": "swe_astropy__astropy-12907_claude-code_demo_r01",
         "run_group": "demo_r01",
@@ -91,6 +91,44 @@ def claude_code_swe_record():
             "latency_s": 321.0,
         },
         "notes": "SWE-bench instance, mode=repo-mentioned, patch_len=2157",
+    }
+
+
+@pytest.fixture
+def claude_code_swe_record_v2():
+    """Post-fix claude-code record: openclaude's inputTokens (includes cache_read)
+    has been decomposed by the runner into pure_input + cache_read.
+    Shape mirrors hermes now — same breakdown vocabulary."""
+    return {
+        "run_id": "swe_astropy__astropy-12907_claude-code_demo_v2_r01",
+        "run_group": "demo_v2_r01",
+        "experiment_id": "demo_v2",
+        "agent": "claude-code",
+        "task_id": "astropy__astropy-12907",
+        "dimension": "token_efficiency",
+        "round": 1,
+        "runtime_profile": "memory-enabled",
+        "metrics": {
+            "tokens_in": 10000,
+            "tokens_out": 9500,
+            "tokens_total": 19500,
+            "task_completed": True,
+            "tool_calls_count": 37,
+            "latency_s": 321.0,
+        },
+        "notes": "SWE-bench instance, mode=repo-mentioned, patch_len=2157",
+        "usage_details": {
+            "input_tokens": 10000,            # pure non-cache input
+            "output_tokens": 9500,
+            "cache_read_tokens": 1035000,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "provider_tokens_total": 19500,
+            "runtime_tokens_total": 1054500,
+            "provider_cost_usd": 0.0271,
+            "runtime_cost_usd": 0.0271,
+            "telemetry_source": "openclaude_model_usage",
+        },
     }
 
 

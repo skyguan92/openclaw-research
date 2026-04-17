@@ -477,36 +477,46 @@ def _run_openclaude_cli(
         elif response:
             error_text = str(response)
         # 提取 token 用量
+        # openclaude 的 modelUsage.inputTokens 包含 cacheReadInputTokens 和
+        # cacheCreationInputTokens（Claude Code / Anthropic SDK 惯例），所以
+        # 需要减掉才是"纯非缓存 input"，否则 runtime 口径会双算 cache。
         model_usage = data.get("modelUsage", {})
         usage = model_usage.get(KIMI_MODEL, {})
-        tokens_in = usage.get("inputTokens", 0)
-        tokens_out = usage.get("outputTokens", 0)
-        cache_read_tokens = usage.get("cacheReadInputTokens", 0)
-        cache_write_tokens = usage.get("cacheCreationInputTokens", 0)
-        cost_usd = usage.get("costUSD", 0)
+        total_input = _safe_int(usage.get("inputTokens"))
+        cache_read_tokens = _safe_int(usage.get("cacheReadInputTokens"))
+        cache_write_tokens = _safe_int(usage.get("cacheCreationInputTokens"))
+        pure_input_tokens = max(0, total_input - cache_read_tokens - cache_write_tokens)
+        tokens_out = _safe_int(usage.get("outputTokens"))
+        cost_usd = float(usage.get("costUSD") or 0)
         duration_ms = data.get("duration_ms", 0)
         num_turns = data.get("num_turns", 0)
         is_error = bool(data.get("is_error")) or subtype.startswith("error")
 
+        provider_tokens_total = pure_input_tokens + tokens_out
+        runtime_tokens_total = (
+            pure_input_tokens + tokens_out + cache_read_tokens + cache_write_tokens
+        )
+
         return AgentResult(
             response=response,
-            tokens_in=tokens_in,
+            tokens_in=pure_input_tokens,
             tokens_out=tokens_out,
-            tokens_total=tokens_in + tokens_out,
+            tokens_total=provider_tokens_total,
             tool_calls=max(0, num_turns - 1),  # first turn is the user message
             latency_s=duration_ms / 1000 if duration_ms else latency,
             error=error_text if is_error else None,
             raw={
                 **data,
                 "usage_details": {
-                    "input_tokens": int(tokens_in or 0),
-                    "output_tokens": int(tokens_out or 0),
-                    "cache_read_tokens": int(cache_read_tokens or 0),
-                    "cache_write_tokens": int(cache_write_tokens or 0),
-                    "provider_tokens_total": int((tokens_in or 0) + (tokens_out or 0)),
-                    "runtime_tokens_total": int((tokens_in or 0) + (tokens_out or 0) + (cache_read_tokens or 0) + (cache_write_tokens or 0)),
-                    "provider_cost_usd": float(cost_usd or 0),
-                    "runtime_cost_usd": float(cost_usd or 0),
+                    "input_tokens": pure_input_tokens,
+                    "output_tokens": tokens_out,
+                    "cache_read_tokens": cache_read_tokens,
+                    "cache_write_tokens": cache_write_tokens,
+                    "reasoning_tokens": 0,
+                    "provider_tokens_total": provider_tokens_total,
+                    "runtime_tokens_total": runtime_tokens_total,
+                    "provider_cost_usd": cost_usd,
+                    "runtime_cost_usd": cost_usd,
                     "telemetry_source": "openclaude_model_usage",
                 },
             },

@@ -1,11 +1,15 @@
-"""Normalized token accounting and TEFS calculation.
+"""Normalized token accounting, cost estimation, and TEFS calculation.
 
 Three runners report tokens differently:
   - openclaw: tokens_total already excludes cache (provider-only).
   - hermes:   tokens_total is runtime-inclusive (input + output +
               cache_read + cache_write + reasoning).
   - claude-code: tokens_total = input + output (cache tracked
-              separately in usage_details if present).
+              separately in usage_details if present). Note: the
+              upstream modelUsage.inputTokens already contains
+              cacheReadInputTokens; the CLI runner subtracts it back
+              out so usage_details.input_tokens here is the pure
+              non-cache input, matching hermes semantics.
 
 This module is the single place that resolves these differences so
 every downstream chart uses the same definitions.
@@ -15,7 +19,29 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-Basis = Literal["provider", "runtime"]
+Basis = Literal["provider", "runtime", "cost_tokens", "cost_usd"]
+
+# Kimi-for-coding public pricing (per 1M tokens, USD) as of 2026-04.
+# Used as fallback when a record doesn't carry provider_cost_usd.
+KIMI_PRICING_PER_M = {
+    "input": 0.15,
+    "cache_read": 0.015,
+    "cache_write": 0.1875,  # = input × 1.25
+    "output": 2.50,
+    "reasoning": 2.50,
+}
+
+# Provider-agnostic "equivalent input token" weights, used for the
+# cost_tokens cross-runtime metric. Mirrors Anthropic's relative pricing
+# so the number stays stable even if we benchmark against a different
+# provider later.
+EQUIV_WEIGHTS = {
+    "input": 1.0,
+    "cache_read": 0.1,
+    "cache_write": 1.25,
+    "output": 3.0,
+    "reasoning": 3.0,
+}
 
 
 def _coerce_int(value) -> int:
@@ -66,6 +92,92 @@ def runtime_tokens(record: dict) -> int:
     return provider_tokens(record)
 
 
+TokenBreakdown = dict[str, int]
+_BREAKDOWN_KEYS = ("pure_input", "cache_read", "cache_write", "output", "reasoning")
+
+
+def token_breakdown(record: dict) -> TokenBreakdown:
+    """Decompose usage into five comparable buckets.
+
+    All three runners populate these under usage_details with a common
+    vocabulary (input_tokens = non-cache input, cache_read_tokens,
+    cache_write_tokens, output_tokens, reasoning_tokens). For legacy
+    records without usage_details we fall back to metrics.tokens_in/out
+    which means pure_input will be overstated on agents that cached (the
+    old openclaw/claude-code rows), but that's the best we can do.
+    """
+    usage = record.get("usage_details") or {}
+    metrics = record.get("metrics") or {}
+
+    def _get(name: str, *fallbacks: str) -> int:
+        for key in (name, *fallbacks):
+            if key in usage and usage[key] is not None:
+                return _coerce_int(usage[key])
+        return 0
+
+    if usage:
+        return {
+            "pure_input": _get("input_tokens"),
+            "cache_read": _get("cache_read_tokens"),
+            "cache_write": _get("cache_write_tokens"),
+            "output": _get("output_tokens"),
+            "reasoning": _get("reasoning_tokens"),
+        }
+
+    # Legacy path: only tokens_in/tokens_out survived.
+    return {
+        "pure_input": _coerce_int(metrics.get("tokens_in")),
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": _coerce_int(metrics.get("tokens_out")),
+        "reasoning": 0,
+    }
+
+
+def cost_tokens(record: dict, weights: dict = EQUIV_WEIGHTS) -> float:
+    """Provider-agnostic "equivalent input tokens" cost.
+
+    Same shape as token_breakdown but weighted. Safe to compare across
+    runtimes as long as they all ran on the same model family (we do —
+    everything is Kimi-for-coding in this benchmark).
+    """
+    bd = token_breakdown(record)
+    return (
+        bd["pure_input"] * weights["input"]
+        + bd["cache_read"] * weights["cache_read"]
+        + bd["cache_write"] * weights["cache_write"]
+        + bd["output"] * weights["output"]
+        + bd["reasoning"] * weights["reasoning"]
+    )
+
+
+def cost_usd(record: dict, pricing_per_m: dict = KIMI_PRICING_PER_M) -> Optional[float]:
+    """Real-dollar cost.
+
+    Prefers the runner-reported value (openclaude already emits it);
+    falls back to a per-breakdown calculation against Kimi pricing for
+    runners that don't populate a cost field. Returns None only when
+    there are truly no tokens to price.
+    """
+    usage = record.get("usage_details") or {}
+    reported = usage.get("provider_cost_usd")
+    if reported is not None:
+        return float(reported)
+
+    bd = token_breakdown(record)
+    total = (
+        bd["pure_input"] * pricing_per_m["input"]
+        + bd["cache_read"] * pricing_per_m["cache_read"]
+        + bd["cache_write"] * pricing_per_m["cache_write"]
+        + bd["output"] * pricing_per_m["output"]
+        + bd["reasoning"] * pricing_per_m["reasoning"]
+    ) / 1_000_000
+
+    if total <= 0 and all(bd[k] == 0 for k in _BREAKDOWN_KEYS):
+        return None
+    return total
+
+
 def tefs(
     record: dict,
     *,
@@ -80,13 +192,25 @@ def tefs(
                       with "cheap and wildly wrong")
       - tokens are 0
     """
-    if basis not in ("provider", "runtime"):
-        raise ValueError(f"tefs basis must be 'provider' or 'runtime', got {basis!r}")
+    if basis not in ("provider", "runtime", "cost_tokens", "cost_usd"):
+        raise ValueError(
+            f"tefs basis must be provider|runtime|cost_tokens|cost_usd, got {basis!r}"
+        )
     if score is None or score == 0:
         return None
 
-    tokens = provider_tokens(record) if basis == "provider" else runtime_tokens(record)
-    if tokens <= 0:
-        return None
+    if basis == "provider":
+        denom = float(provider_tokens(record))
+    elif basis == "runtime":
+        denom = float(runtime_tokens(record))
+    elif basis == "cost_tokens":
+        denom = cost_tokens(record)
+    else:  # cost_usd
+        dollars = cost_usd(record)
+        if dollars is None or dollars <= 0:
+            return None
+        return float(score) / dollars
 
-    return float(score) / (tokens / 1000.0)
+    if denom <= 0:
+        return None
+    return float(score) / (denom / 1000.0)

@@ -13,7 +13,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from analysis.metrics import provider_tokens, runtime_tokens, tefs
+from analysis.metrics import (
+    cost_tokens,
+    cost_usd,
+    provider_tokens,
+    runtime_tokens,
+    tefs,
+    token_breakdown,
+)
 from analysis.outcome import Outcome, classify
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
@@ -83,11 +90,11 @@ def filter_records(
 
 
 def flatten_metrics(records: list[dict]) -> pd.DataFrame:
-    """将 nested metrics 展平为 DataFrame。"""
+    """将 nested metrics 展平为 DataFrame（附带 token_breakdown/cost 列）。"""
     rows = []
     for r in records:
-        usage_details = r.get("usage_details", {})
-        metrics = dict(r.get("metrics", {}))
+        usage_details = r.get("usage_details") or {}
+        metrics = dict(r.get("metrics") or {})
         tokens_in = metrics.get("tokens_in", 0) or 0
         tokens_out = metrics.get("tokens_out", 0) or 0
         provider_total = metrics.get("provider_tokens_total")
@@ -100,6 +107,8 @@ def flatten_metrics(records: list[dict]) -> pd.DataFrame:
             runtime_total = usage_details.get("runtime_tokens_total")
         if runtime_total is None:
             runtime_total = metrics.get("tokens_total", provider_total)
+
+        bd = token_breakdown(r)
         row = {
             "run_id": r["run_id"],
             "run_group": r.get("run_group"),
@@ -112,10 +121,20 @@ def flatten_metrics(records: list[dict]) -> pd.DataFrame:
             "error": r.get("error"),
             "provider_tokens_total": provider_total,
             "runtime_tokens_total": runtime_total,
+            "pure_input_tokens": bd["pure_input"],
+            "cache_read_tokens": bd["cache_read"],
+            "cache_write_tokens": bd["cache_write"],
+            "output_tokens": bd["output"],
+            "reasoning_tokens": bd["reasoning"],
+            "cost_tokens": cost_tokens(r),
+            "cost_usd": cost_usd(r),
         }
         row.update(metrics)
+        # Keep usage_details fields but don't clobber our normalized columns.
         if isinstance(usage_details, dict):
-            row.update(usage_details)
+            for k, v in usage_details.items():
+                if k not in row:
+                    row[k] = v
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -164,55 +183,56 @@ def summarize_tokens(records: list[dict]) -> None:
     for r in tok_records:
         by_agent.setdefault(r["agent"], []).append(r)
 
-    print("  (runtime_tokens = all tokens processed by runtime incl. cache;")
-    print("   provider_tokens = billable non-cache tokens — only hermes tracks this separately)")
+    print("  breakdown: pure_input | cache_read | cache_write | output | reasoning")
+    print("  cost_tokens = provider-agnostic equivalent-input tokens "
+          "(input=1, cache_read=0.1, cache_write=1.25, output=3, reasoning=3)")
+    print("  cost_usd    = Kimi-for-coding pricing "
+          "($0.15 / $0.015 / $0.1875 / $2.50 per M)\n")
+
+    def _mean(values):
+        values = [v for v in values if v is not None]
+        return (sum(values) / len(values)) if values else None
+
     for agent in AGENTS:
         rows = by_agent.get(agent)
         if not rows:
             continue
-        prov = sum(provider_tokens(r) for r in rows) / len(rows)
-        runt = sum(runtime_tokens(r) for r in rows) / len(rows)
-        cache_reads = [
-            (r.get("usage_details") or {}).get("cache_read_tokens")
-            for r in rows
-            if (r.get("usage_details") or {}).get("cache_read_tokens") is not None
-        ]
-        avg_cache = (sum(cache_reads) / len(cache_reads)) if cache_reads else None
 
-        tool_calls = [
-            (r.get("metrics") or {}).get("tool_calls_count")
-            for r in rows
-            if (r.get("metrics") or {}).get("tool_calls_count") is not None
-        ]
-        avg_tools = (sum(tool_calls) / len(tool_calls)) if tool_calls else None
+        breakdowns = [token_breakdown(r) for r in rows]
+        avg = {k: sum(b[k] for b in breakdowns) / len(breakdowns)
+               for k in ("pure_input", "cache_read", "cache_write", "output", "reasoning")}
 
-        resolved_scores = [
-            1.0 if (r.get("metrics") or {}).get("resolved") else 0.0
-            for r in rows
-            if (r.get("metrics") or {}).get("resolved") is not None
-        ]
-        resolved_rate = (sum(resolved_scores) / len(resolved_scores)) if resolved_scores else None
+        avg_cost_tokens = sum(cost_tokens(r) for r in rows) / len(rows)
+        usd_vals = [cost_usd(r) for r in rows]
+        avg_cost_usd = _mean(usd_vals)
 
-        tefs_values = [
-            tefs(r, score=(r.get("metrics") or {}).get("resolved") and 1.0 or None, basis="runtime")
-            for r in rows
-        ]
-        tefs_values = [v for v in tefs_values if v is not None]
-        avg_tefs_resolved = (sum(tefs_values) / len(tefs_values)) if tefs_values else None
+        tool_calls = [(r.get("metrics") or {}).get("tool_calls_count") for r in rows]
+        avg_tools = _mean(tool_calls)
 
-        parts = [f"  {agent:15s}",
-                 f"avg_runtime_tokens={runt:.0f}"]
-        if abs(runt - prov) >= 1:
-            parts.append(f"avg_provider_tokens={prov:.0f}")
-            if avg_cache is not None:
-                parts.append(f"avg_cache_read={avg_cache:.0f}")
+        resolved_vals = [(r.get("metrics") or {}).get("resolved") for r in rows]
+        resolved_vals = [bool(v) for v in resolved_vals if v is not None]
+        resolved_rate = (sum(resolved_vals) / len(resolved_vals)) if resolved_vals else None
+
+        tefs_vals = [tefs(r, score=1.0 if (r.get("metrics") or {}).get("resolved") else None,
+                          basis="cost_tokens") for r in rows]
+        avg_tefs = _mean(tefs_vals)
+
+        print(f"  {agent:15s} "
+              f"input={avg['pure_input']:>10,.0f}  "
+              f"cache_r={avg['cache_read']:>10,.0f}  "
+              f"cache_w={avg['cache_write']:>8,.0f}  "
+              f"output={avg['output']:>7,.0f}  "
+              f"reason={avg['reasoning']:>6,.0f}")
+        summary_parts = [f"    → cost_tokens={avg_cost_tokens:>10,.0f}"]
+        if avg_cost_usd is not None:
+            summary_parts.append(f"cost_usd=${avg_cost_usd:.4f}")
         if avg_tools is not None:
-            parts.append(f"avg_tool_calls={avg_tools:.1f}")
+            summary_parts.append(f"tools={avg_tools:.1f}")
         if resolved_rate is not None:
-            parts.append(f"resolved_rate={resolved_rate:.0%}")
-        if avg_tefs_resolved is not None:
-            parts.append(f"TEFS_resolved(runtime)={avg_tefs_resolved:.4f}")
-        print("  ".join(parts))
+            summary_parts.append(f"resolved={resolved_rate:.0%}")
+        if avg_tefs is not None:
+            summary_parts.append(f"TEFS(cost_tokens)={avg_tefs:.4f}")
+        print("  ".join(summary_parts))
 
 
 def summarize_success(records: list[dict]) -> None:
@@ -276,21 +296,19 @@ def summarize_rounds(df: pd.DataFrame) -> None:
             agent_data = round_data[round_data["agent"] == agent]
             if agent_data.empty:
                 continue
-            provider_total = _mean_if_present(agent_data, "provider_tokens_total")
-            runtime_total = _mean_if_present(agent_data, "runtime_tokens_total")
-            completion = _mean_if_present(agent_data, "task_completed")
+            ct = _mean_if_present(agent_data, "cost_tokens")
+            usd = _mean_if_present(agent_data, "cost_usd")
+            tool_calls = _mean_if_present(agent_data, "tool_calls_count")
             latency = _mean_if_present(agent_data, "latency_s")
             parts = [f"    {agent:13s}"]
-            if runtime_total is not None:
-                parts.append(f"runtime_tokens={runtime_total:.0f}")
-            if provider_total is not None and (
-                runtime_total is None or abs(runtime_total - provider_total) >= 1
-            ):
-                parts.append(f"provider_tokens={provider_total:.0f}")
-            if completion is not None:
-                parts.append(f"completion_rate={completion:.0%}")
+            if ct is not None:
+                parts.append(f"cost_tokens={ct:,.0f}")
+            if usd is not None:
+                parts.append(f"cost_usd=${usd:.4f}")
+            if tool_calls is not None:
+                parts.append(f"tools={tool_calls:.1f}")
             if latency is not None:
-                parts.append(f"avg_latency_s={latency:.1f}")
+                parts.append(f"latency_s={latency:.1f}")
             print("  ".join(parts))
 
 
