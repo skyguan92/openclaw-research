@@ -144,6 +144,7 @@ def _seed_openclaw_state(state_dir: Path) -> None:
         }
 
     _enable_openclaw_kimi_stream_usage(config)
+    _strip_openclaw_host_extensions(config)
 
     # Preserve provider/auth config but always start from a clean agent registry.
     config["agents"] = {"list": [{"id": "main"}]}
@@ -192,6 +193,20 @@ def _enable_openclaw_kimi_stream_usage(config: dict) -> None:
                 compat = {}
                 model["compat"] = compat
             compat["supportsUsageInStreaming"] = True
+
+
+def _strip_openclaw_host_extensions(config: dict) -> None:
+    """Drop host-specific MCP servers and chat plugins from seeded config.
+
+    A fresh OpenClaw install on a host may carry MCP servers (e.g. a local
+    aima-serve integration) and chat-channel plugins (feishu, discord, …)
+    that block startup when seeded state is spun up inside a benchmark. The
+    benchmark only needs model inference, so strip both sections to keep
+    each run reproducible and fast.
+    """
+    config.pop("mcp", None)
+    config.pop("plugins", None)
+    config.pop("channels", None)
 
 
 def _seed_hermes_home(state_dir: Path) -> None:

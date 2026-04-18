@@ -108,7 +108,7 @@ def run_smoke_test():
     # 3. 分析脚本
     print("\n[3/4] 测试分析脚本...")
     r = subprocess.run(
-        [sys.executable, "analysis/compare.py", "--demo"],
+        [sys.executable, "-m", "analysis.compare", "--demo"],
         capture_output=True,
         text=True,
         cwd=str(ROOT),
