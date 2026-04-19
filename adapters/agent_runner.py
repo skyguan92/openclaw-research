@@ -94,17 +94,103 @@ def _safe_int(value: object) -> int:
         return 0
 
 
+def _read_openclaw_usage(
+    runtime_state_dir: Path | None,
+    *,
+    started_at: float,
+    finished_at: float,
+) -> dict:
+    """从隔离 OPENCLAW_STATE_DIR 的 session jsonl 回填本次 CLI 的 token 用量。
+
+    openclaw `infer model run --json` 的 stdout 丢弃了 usage；真实 telemetry 写在
+    `{state_dir}/agents/main/sessions/*.jsonl` 里每条 assistant message 的
+    `usage: {input, output, cacheRead, cacheWrite, totalTokens}` 字段。
+    """
+    if runtime_state_dir is None:
+        return {}
+
+    sessions_dir = runtime_state_dir / "agents" / "main" / "sessions"
+    if not sessions_dir.exists():
+        return {}
+
+    lower_ms = (started_at - 2.0) * 1000
+    upper_ms = (finished_at + 5.0) * 1000
+
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0}
+    message_count = 0
+
+    for path in sorted(sessions_dir.glob("*.jsonl")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("type") != "message":
+                continue
+            message = record.get("message") or {}
+            if message.get("role") != "assistant":
+                continue
+            ts = message.get("timestamp")
+            if not isinstance(ts, (int, float)):
+                continue
+            if ts < lower_ms or ts > upper_ms:
+                continue
+            usage = message.get("usage") or {}
+            if not isinstance(usage, dict):
+                continue
+            totals["input"] += _safe_int(usage.get("input"))
+            totals["output"] += _safe_int(usage.get("output"))
+            totals["cache_read"] += _safe_int(usage.get("cacheRead"))
+            totals["cache_write"] += _safe_int(usage.get("cacheWrite"))
+            totals["total"] += _safe_int(usage.get("totalTokens"))
+            message_count += 1
+
+    if message_count == 0:
+        return {}
+
+    provider_total = totals["input"] + totals["output"]
+    runtime_total = totals["total"] or (
+        provider_total + totals["cache_read"] + totals["cache_write"]
+    )
+    return {
+        "tokens_in": totals["input"],
+        "tokens_out": totals["output"],
+        "tokens_total": runtime_total,
+        "usage_details": {
+            "input_tokens": totals["input"],
+            "output_tokens": totals["output"],
+            "cache_read_tokens": totals["cache_read"],
+            "cache_write_tokens": totals["cache_write"],
+            "provider_tokens_total": provider_total,
+            "runtime_tokens_total": runtime_total,
+            "message_count": message_count,
+            "telemetry_source": "openclaw_session_jsonl",
+        },
+    }
+
+
 def _read_hermes_usage(
     runtime_state_dir: Path | None,
     *,
     started_at: float,
     finished_at: float,
 ) -> dict:
-    """从隔离 HERMES_HOME/state.db 回填本次 CLI 运行的 token/tool telemetry。"""
-    if runtime_state_dir is None:
-        return {}
+    """从 HERMES_HOME/state.db 回填本次 CLI 运行的 token/tool telemetry。
 
-    db_path = runtime_state_dir / "state.db"
+    默认 profile 下 runtime_state_dir=None，hermes 写入 ~/.hermes/state.db；
+    memory-enabled profile 下走隔离 HERMES_HOME。两种情况都靠 started_at
+    窗口过滤定位本次调用，跨运行的旧 session 不会被误计入。"""
+    if runtime_state_dir is not None:
+        db_path = runtime_state_dir / "state.db"
+    else:
+        db_path = Path.home() / ".hermes" / "state.db"
     if not db_path.exists():
         return {}
 
@@ -303,6 +389,22 @@ def _run_openclaw_cli(
         if outputs:
             text = outputs[0].get("text", "")
         tokens_in, tokens_out, tokens_total = _extract_usage(data)
+
+        # `--json` stdout omits usage; fall back to the session jsonl that
+        # OpenClaw writes into {state_dir}/agents/main/sessions/*.jsonl.
+        raw = dict(data)
+        if tokens_in == 0 and tokens_out == 0 and tokens_total == 0:
+            usage = _read_openclaw_usage(
+                runtime_state_dir,
+                started_at=t0,
+                finished_at=t0 + latency,
+            )
+            if usage:
+                tokens_in = usage["tokens_in"]
+                tokens_out = usage["tokens_out"]
+                tokens_total = usage["tokens_total"]
+                raw["usage_from_session_jsonl"] = usage["usage_details"]
+
         return AgentResult(
             response=text,
             tokens_in=tokens_in,
@@ -310,7 +412,7 @@ def _run_openclaw_cli(
             tokens_total=tokens_total,
             tool_calls=_extract_tool_calls(data),
             latency_s=latency,
-            raw=data,
+            raw=raw,
         )
 
     except subprocess.TimeoutExpired:
