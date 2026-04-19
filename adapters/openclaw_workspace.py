@@ -770,32 +770,55 @@ def _run_openclaw_agent(
     final_call_in = int(usage.get("input", agent_meta.get("promptTokens", 0)) or 0)
     final_call_out = int(usage.get("output", 0) or 0)
     final_call_total = int(usage.get("total", usage.get("totalTokens", final_call_in + final_call_out)) or (final_call_in + final_call_out))
-    tokens_in = session_summary["tokens_in"] or final_call_in or int(after_session["meta"].get("inputTokens", 0) or 0)
-    reported_tokens_out = (
-        session_summary.get("reported_tokens_out", 0)
-        or final_call_out
-        or int(after_session["meta"].get("outputTokens", 0) or 0)
+    # `after_session["meta"]` counters are cumulative across every call the
+    # agent has made in this session (openclaw's session index). Falling
+    # back to them when *this* call produced no per-call signal is how
+    # silent non-runs (e.g. memory-enabled round that exits in 15s with 0
+    # tool calls) inherit prior rounds' token totals. Only trust the
+    # cumulative meta if at least one per-call source saw activity.
+    has_new_activity = (
+        bool(session_summary["tokens_in"])
+        or bool(session_summary.get("reported_tokens_out", 0))
+        or bool(session_summary.get("tool_calls", 0))
+        or bool(final_call_in)
+        or bool(final_call_out)
     )
+    if has_new_activity:
+        tokens_in = session_summary["tokens_in"] or final_call_in or int(after_session["meta"].get("inputTokens", 0) or 0)
+        reported_tokens_out = (
+            session_summary.get("reported_tokens_out", 0)
+            or final_call_out
+            or int(after_session["meta"].get("outputTokens", 0) or 0)
+        )
+    else:
+        tokens_in = 0
+        reported_tokens_out = 0
     estimated_tokens_out = session_summary.get("estimated_tokens_out", 0)
     counted_tokens_out = session_summary.get("counted_tokens_out", 0)
     approx_tokens_out = session_summary.get("approx_tokens_out", 0)
     tokens_out = reported_tokens_out or estimated_tokens_out
     cache_read = session_summary.get("cache_read_tokens", 0)
     cache_write = session_summary.get("cache_write_tokens", 0)
-    reported_tokens_total = (
-        session_summary.get("reported_tokens_total", 0)
-        or final_call_total
-        or int(after_session["meta"].get("totalTokens", 0) or (tokens_in + reported_tokens_out + cache_read + cache_write))
-    )
-    tokens_total = session_summary.get("effective_tokens_total", 0) or int(
-        after_session["meta"].get("totalTokens", 0) or (tokens_in + tokens_out + cache_read + cache_write)
-    )
+    if has_new_activity:
+        reported_tokens_total = (
+            session_summary.get("reported_tokens_total", 0)
+            or final_call_total
+            or int(after_session["meta"].get("totalTokens", 0) or (tokens_in + reported_tokens_out + cache_read + cache_write))
+        )
+        tokens_total = session_summary.get("effective_tokens_total", 0) or int(
+            after_session["meta"].get("totalTokens", 0) or (tokens_in + tokens_out + cache_read + cache_write)
+        )
+    else:
+        reported_tokens_total = 0
+        tokens_total = 0
     tool_calls = int(meta.get("toolSummary", {}).get("calls", 0) or session_summary["tool_calls"] or 0)
     duration_ms = meta.get("durationMs", 0) or 0
     latency_s = duration_ms / 1000 if duration_ms else elapsed_s
     error = process_error
     if not error and result and result.returncode != 0:
         error = stderr.strip() or stdout.strip() or f"exit={result.returncode}"
+    if not error and not has_new_activity:
+        error = "silent_exit_no_api_activity"
 
     return AgentResult(
         response=response,
@@ -850,6 +873,7 @@ def _run_openclaw_agent(
                     else "approx_chars_div_4_from_text_and_tool_calls"
                 ),
                 "telemetry_source": "openclaw_session_events",
+                "has_new_activity": has_new_activity,
             },
         },
     )
