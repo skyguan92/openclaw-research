@@ -34,3 +34,32 @@ sets:
       - sphinx-doc__sphinx-8551
       - sympy__sympy-13647
       - sympy__sympy-21379
+
+  mem-eval-v1:
+    description: |
+      15 instances stratified across difficulty for mem-eval v1.
+      Distribution: 5 × "15 min - 1 hour", 7 × "1-4 hours", 3 × ">4 hours".
+      (The >4h tier only has 3 instances in all of Verified — we take all.)
+      Repo distribution (max 3 per repo): astropy 2, django 2, matplotlib 1,
+      pydata/xarray 2, pylint 1, pytest 1, sklearn 1, sphinx 2, sympy 3.
+      Excludes astropy-12907 (saturated in pilot), django-11138 and
+      django-13212 (used in mem5-postfix pilot).
+    instance_ids:
+      # ---- 15 min - 1 hour (5) ----
+      - astropy__astropy-14096
+      - django__django-13279
+      - matplotlib__matplotlib-22865
+      - pydata__xarray-3305
+      - sphinx-doc__sphinx-8638
+      # ---- 1-4 hours (7) ----
+      - astropy__astropy-13579
+      - django__django-11400
+      - django__django-13128
+      - pylint-dev__pylint-4551
+      - pytest-dev__pytest-5787
+      - scikit-learn__scikit-learn-25102
+      - sympy__sympy-14248
+      # ---- >4 hours (3, all of Verified's hardest) ----
+      - pydata__xarray-6992
+      - sphinx-doc__sphinx-7590
+      - sympy__sympy-13878
