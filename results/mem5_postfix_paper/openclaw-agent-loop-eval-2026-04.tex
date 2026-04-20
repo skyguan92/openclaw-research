@@ -76,7 +76,7 @@
 
 \textbf{所谓"三分天下"其实是解析器 bug 的影子}。修复该 bug（Kimi 的 \texttt{data:} 无空格路径改走 \texttt{slice(5).trimStart()}）之后，我们在比 \texttt{astropy-12907} 更难的两道 django 任务上重跑了 3 款 Agent × 5 轮 × 3 任务。这篇报告就是那次复跑的结果。
 
-这次复跑主要做了三件事。首先是把原报告里"\texttt{claude-code} 独立形态"的结论明确撤回——SSE 修复以后，\texttt{claude-code} 和 \texttt{hermes} 的 cache 画像都落在 97.1\% 量级上，肉眼基本看不出区别。然后是把 benchmark 从饱和的 \texttt{astropy-12907}（三家都 100\%）换到两道 django hard，三家通过率这才第一次分开（6/6 vs 6/6 vs 2/6）。最后顺手修了一个数据完整性 bug：\texttt{openclaw} 的 adapter 在当前轮没新会话事件时，会把 \texttt{after\_session["meta"]} 的\emph{累计}计数当成本轮的 token 用量；修复已经回填到历史数据。
+所以这份报告做的事其实都是在善后。SSE 修完以后 \texttt{claude-code} 和 \texttt{hermes} 的 cache 画像都落到 97.1\% 量级，肉眼基本看不出区别——原报告里"\texttt{claude-code} 独立形态"这条线必须直接撤回。benchmark 也得换：\texttt{astropy-12907} 对三家都 100\% 饱和，区分不出任何东西，于是补进两道 django hard，三家的通过率这才第一次真正分开（6/6 vs 6/6 vs 2/6）。清理过程中还顺手挖出 \texttt{openclaw} adapter 的一个旧 bug——当前轮没有新会话事件时，它会把 \texttt{after\_session["meta"]} 的\emph{累计}计数当本轮 token 用量，我们把这条回退砍掉、并给 6 条受污染的历史记录做了回填。
 
 % ======================= 2. Background & Setup =======================
 \section{背景与实验配置}
@@ -185,14 +185,14 @@ Agent & astropy-12907 & django-11138 & django-13212 \\
 原报告基于"三分形态"提出的几个衍生结论——比如"\texttt{claude-code} 通过激进 cache 获得了最低的 cost\_tokens"——在这次修复后的数据下不成立。三款 Agent 里 \texttt{openclaw} 的 cache\% 仍然略低（92.7\%），但差距只有 4--5 个百分点，且样本量（n=2 成功 run）不足以支撑窄置信区间。我们撤回原报告第 3、4 节的排序结论。
 
 \subsection{忠实遥测作为方法论要求}
-两个 bug——上游 shim 的 SSE 解析、我们自己 adapter 的累计 meta 回退——都不会让脚本崩溃，只是悄悄污染数字。它们能被注意到纯粹是因为数字"看起来太整齐"了：\texttt{pure\_input}=0，r04/r05 的 token 数刚好等于 r03。靠这种巧合发现 bug 并不牢靠。与其依赖运气，不如让遥测本身提供检查点：每轮记一次 \texttt{final\_call\_input\_tokens}（这次调用的 usage，不是累计）；加一个显式的 \texttt{has\_new\_activity} 布尔字段把"本轮真干活"和"本轮复用了之前的状态但没产生新活动"分开；agent 异常退出（静默、panic、超时）写明确的错误码，而不是默认写入 \texttt{error=null}。这三样不用多花什么成本，但能省掉下一次"数字太整齐"才回头查的时间。
+这次两个 bug——上游 shim 的 SSE 解析、adapter 自己的累计 meta 回退——都没让脚本崩，只是在数字里悄悄掺水。我们能发现它们其实靠的是运气：\texttt{pure\_input}=0 这个值太显眼，r04/r05 的 token 数又恰好等于 r03。靠"数字看起来太整齐"反查 bug 不是一种可持续的流程。务实的办法是让遥测本身留点自检的余量。最要紧的一条是把"这一次调用的 usage"和"会话累计 usage"彻底拆成两个字段，不允许回退时混用——我们这次被坑就是这两个值被合并之后，adapter 一走第三层 fallback 就自动撒谎。再加一个 \texttt{has\_new\_activity} 标志也很值得，毕竟"本轮真跑了一遍"和"本轮保留了状态但根本没发过请求"是完全不同的两件事，可现在的记录里看起来一模一样。至于 agent 异常退出，\texttt{error=null} 太宽容了，老老实实写清 \texttt{silent\_exit}/\texttt{panic}/\texttt{timeout} 的成本非常低。下次再遇到"数字怎么这么整齐"的时候，这些字段至少能把排查范围收得紧很多。
 
 \subsection{局限}
 这次实验的主要局限是样本量。受 Kimi 配额约束，可用来横向对比的完整窗口只有 r01+r02（每 Agent 6 次成功调用）。结论在这 6 次上稳定，但我们没有 bootstrap 置信区间。下一步我们会在配额恢复后扩到完整 5 轮并加 instance 数到 15-20 道。
 
 % ======================= 6. Conclusion =======================
 \section{结论}
-数据采集管线自己有 bug 的时候，Agent 之间看起来的"显著差异"常常只是管线的差异。把解析 bug 和遥测 bug 都修掉之后，两款走 Anthropic 协议的 Agent 在 Kimi 后端上的 cache 画像几乎重合；真正把三款 Agent 分开的，是 \texttt{openclaw} 在硬任务上 agent-loop 的稳定性——33\% 的通过率，加上两种可重现的失败模式（死循环和过早放弃）。我们从这次经验里抽出的三点想法，更像是对下一轮基准实验的自我提醒：挑几道难度没饱和的任务做起点，通过率之外顺便把失败模式分布也报出来；发表之前最好对遥测链路做一次"数字看起来是不是太整齐了"的复盘。
+数据管线自己有 bug 的时候，Agent 间看起来的"显著差异"常常只是管线差异。把解析 bug 和遥测 bug 都修掉之后，两款走 Anthropic 协议的 Agent 在 Kimi 后端上的 cache 画像几乎完全重合——真正把三家拉开的其实是 \texttt{openclaw} 在硬任务上 agent-loop 的稳定性，33\% 的通过率配上两种可重现的失败模式（死循环、过早放弃），说的都是同一件事。对我们下一轮实验的提醒也都挺朴素的：benchmark 别再停在所有人都 100\% 通过的题上；通过率旁边顺手把失败模式的分布也报出来，否则两个 6/6 看起来会像是"没差别"；发稿前留点时间盯着遥测的数字问一句"这组数看起来是不是太整齐了"——我们这次就是这种复盘把两个 bug 揪了出来。
 
 % ======================= References =======================
 \section*{致谢}
