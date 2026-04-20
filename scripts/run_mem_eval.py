@@ -54,7 +54,7 @@ import json
 import random
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -83,6 +83,41 @@ def _experiment_id(agent: str, mem: str, seq: int) -> str:
     # same experiment_id across rounds of one mem-on sequence is what makes
     # the 5-round conversation persist.
     return f"mem_eval_v1__{agent}__mem{mem}__seq{seq:02d}"
+
+
+@dataclass(frozen=True)
+class CellPlan:
+    """Resolved parameters for one atomic cell.
+
+    We always use `runtime_profile="memory-enabled"` — that's what tells
+    the adapter to isolate state under `data/runtime_state/` rather than
+    leaking into the user's real `~/.openclaw/`. The mem=on vs mem=off
+    distinction is expressed entirely via `reset_state` and the
+    `experiment_id` namespace:
+
+      mem=off  each cell gets its own experiment_id (seq), state is wiped
+               before every call → truly fresh per replicate
+      mem=on   all 5 rounds share one experiment_id (seq), state is wiped
+               only on round 1 → rounds 2..5 inherit prior memory
+    """
+
+    runtime_profile: str
+    reset_state: bool
+    experiment_id: str
+
+
+def plan_cell(agent: str, mem: str, seq: int, round_idx: int) -> CellPlan:
+    if mem == "off" and round_idx != 1:
+        raise ValueError("mem=off only has round 1 (each replicate is independent)")
+    if mem == "on" and not (1 <= round_idx <= 5):
+        raise ValueError("mem=on rounds must be in 1..5")
+
+    reset_state = (mem == "off") or (round_idx == 1)
+    return CellPlan(
+        runtime_profile="memory-enabled",
+        reset_state=reset_state,
+        experiment_id=_experiment_id(agent, mem, seq),
+    )
 
 
 def _load_instance(task_id: str) -> dict:
@@ -129,12 +164,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     seq: int = args.seq
     round_idx: int = args.round
 
-    if mem == "off" and round_idx != 1:
-        raise SystemExit("mem=off only has round 1 (each replicate is independent)")
-    if mem == "on" and not (1 <= round_idx <= 5):
-        raise SystemExit("mem=on rounds must be in 1..5")
     if agent not in AGENTS:
         raise SystemExit(f"agent must be one of {AGENTS}")
+    try:
+        plan = plan_cell(agent, mem, seq, round_idx)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     out_path = _output_path(task_id, agent, mem, seq, round_idx)
     if out_path.exists() and not args.force:
@@ -142,33 +177,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     instance = _load_instance(task_id)
-    experiment_id = _experiment_id(agent, mem, seq)
-    runtime_profile = "memory-enabled" if mem == "on" else "default"
-    # For mem=off: always reset. For mem=on: reset only on round 1 of the
-    # sequence; rounds 2..5 must inherit state.
-    reset_state = (mem == "off") or (round_idx == 1)
 
     from adapters.swebench_adapter import run_agent_on_instance
 
     print(f"[run] task={task_id} agent={agent} mem={mem} seq={seq} round={round_idx}")
-    print(f"      experiment_id={experiment_id} reset_state={reset_state} profile={runtime_profile}")
+    print(
+        f"      experiment_id={plan.experiment_id} reset_state={plan.reset_state} "
+        f"profile={plan.runtime_profile}"
+    )
     t0 = time.time()
     output = run_agent_on_instance(
         agent,
         instance,
         mode="repo-mentioned",
-        run_group=experiment_id,
-        experiment_id=experiment_id,
+        run_group=plan.experiment_id,
+        experiment_id=plan.experiment_id,
         round_index=round_idx,
         timeout=args.timeout,
-        runtime_profile=runtime_profile,
-        reset_runtime_state=reset_state,
+        runtime_profile=plan.runtime_profile,
+        reset_runtime_state=plan.reset_state,
     )
     elapsed = time.time() - t0
 
     token_record = output["token_record"]
     token_record = _augment_record(
-        token_record, mem=mem, seq=seq, round_idx=round_idx, experiment_id=experiment_id
+        token_record, mem=mem, seq=seq, round_idx=round_idx, experiment_id=plan.experiment_id
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)

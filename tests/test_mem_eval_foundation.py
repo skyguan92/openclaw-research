@@ -14,6 +14,11 @@ from __future__ import annotations
 
 import pytest
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from adapters.kimi_pricing import (
     PRICE_TABLE_VERSION,
     TokenCounts,
@@ -22,6 +27,7 @@ from adapters.kimi_pricing import (
     sanity_check_token_sum,
 )
 from adapters.outcome_classifier import Outcome, classify_outcome
+from scripts.run_mem_eval import plan_cell  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -106,12 +112,23 @@ def test_extract_token_counts_from_claude_code_v2(claude_code_swe_record_v2):
 
 
 def test_sanity_check_within_tolerance():
+    """Anthropic convention: tokens_in = pure + cache_read + cache_write."""
     tokens = TokenCounts(pure_input=100, cache_read=200, cache_write=0, output=50)
     ok, _ = sanity_check_token_sum(tokens, reported_total_input=300)
     assert ok
 
 
+def test_sanity_check_accepts_openclaw_convention():
+    """openclaw reports tokens_in as pure_input only; cache_read is a
+    sibling field. sanity_check should accept this as consistent."""
+    tokens = TokenCounts(pure_input=254_752, cache_read=2_250_368, cache_write=0, output=10_590)
+    ok, msg = sanity_check_token_sum(tokens, reported_total_input=254_752)
+    assert ok, msg
+    assert "runtime-style" in msg
+
+
 def test_sanity_check_rejects_drift():
+    """Neither convention matches → real drift."""
     tokens = TokenCounts(pure_input=100, cache_read=100, cache_write=0, output=50)
     ok, _ = sanity_check_token_sum(tokens, reported_total_input=500, tolerance=0.01)
     assert not ok
@@ -213,3 +230,59 @@ def test_classify_telemetry_error_beats_success():
     rec["metrics"]["tokens_in"] = 10_000  # but usage_details says 19_000
     result = classify_outcome(rec)
     assert result.outcome == Outcome.TELEMETRY_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Cell planning — isolation invariants
+# ---------------------------------------------------------------------------
+
+
+def test_plan_cell_always_uses_isolated_state():
+    """Both mem profiles must pick `memory-enabled` so state dirs are
+    isolated under data/runtime_state/, never the user's ~/.openclaw."""
+    assert plan_cell("openclaw", "off", 1, 1).runtime_profile == "memory-enabled"
+    assert plan_cell("openclaw", "on", 1, 1).runtime_profile == "memory-enabled"
+
+
+def test_plan_cell_memoff_always_resets():
+    plan = plan_cell("openclaw", "off", 1, 1)
+    assert plan.reset_state is True
+
+
+def test_plan_cell_memon_resets_only_on_round_1():
+    assert plan_cell("openclaw", "on", 1, 1).reset_state is True
+    for r in (2, 3, 4, 5):
+        assert plan_cell("openclaw", "on", 1, r).reset_state is False
+
+
+def test_plan_cell_memon_rounds_share_experiment_id():
+    """5 rounds of one mem-on sequence must land in the same state dir,
+    otherwise 'memory carries across rounds' isn't tested."""
+    eids = {plan_cell("openclaw", "on", 1, r).experiment_id for r in range(1, 6)}
+    assert len(eids) == 1
+
+
+def test_plan_cell_different_seqs_are_isolated():
+    """Two seqs under the same profile must use different experiment_ids,
+    otherwise replicates contaminate each other."""
+    eid1 = plan_cell("openclaw", "off", 1, 1).experiment_id
+    eid2 = plan_cell("openclaw", "off", 2, 1).experiment_id
+    assert eid1 != eid2
+
+
+def test_plan_cell_different_agents_are_isolated():
+    eid_openclaw = plan_cell("openclaw", "on", 1, 1).experiment_id
+    eid_hermes = plan_cell("hermes", "on", 1, 1).experiment_id
+    assert eid_openclaw != eid_hermes
+
+
+def test_plan_cell_memon_round_out_of_range():
+    with pytest.raises(ValueError):
+        plan_cell("openclaw", "on", 1, 6)
+    with pytest.raises(ValueError):
+        plan_cell("openclaw", "on", 1, 0)
+
+
+def test_plan_cell_memoff_round_must_be_1():
+    with pytest.raises(ValueError):
+        plan_cell("openclaw", "off", 1, 2)

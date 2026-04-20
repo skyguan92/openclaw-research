@@ -437,7 +437,9 @@ def _run_hermes_cli(
     config.yaml 中 provider: custom:kimi 指向 api.kimi.com
     """
     hermes_bin = str(Path.home() / ".hermes/hermes-agent/.venv/bin/hermes")
-    cmd = [hermes_bin, "chat", "-q", prompt, "-Q"]
+    # Disable hermes' native 90-turn cap; wall-clock timeout is the sole
+    # cut point so all three runtimes share one comparable exit protocol.
+    cmd = [hermes_bin, "chat", "-q", prompt, "-Q", "--max-turns", "10000"]
     env = _build_clean_env(build_runtime_env("hermes", runtime_state_dir))
 
     def _usage_raw(usage: dict) -> dict:

@@ -153,21 +153,37 @@ def sanity_check_token_sum(
     reported_total_input: int,
     tolerance: float = 0.01,
 ) -> tuple[bool, str]:
-    """Internal consistency check: the adapter's `tokens_in` should equal
-    `pure_input + cache_read + cache_write` within tolerance.
+    """Internal consistency check on `metrics.tokens_in`.
 
-    Returns `(ok, message)`. On mismatch, callers should tag the record's
-    outcome as `telemetry_error` and keep the raw numbers for audit.
+    The three runtimes disagree on what `tokens_in` means, so we accept
+    either of the two conventions and flag drift only if neither matches:
+
+      - Anthropic-style (hermes, claude-code):
+          tokens_in == pure_input + cache_read + cache_write
+      - Runtime-style (openclaw):
+          tokens_in == pure_input   (cache_read reported as a sibling field)
+
+    Returns `(ok, message)`. On mismatch against both conventions, callers
+    should tag the record's outcome as `telemetry_error` and keep the raw
+    numbers for audit.
     """
-    parts = tokens.pure_input + tokens.cache_read + tokens.cache_write
-    if reported_total_input == 0 and parts == 0:
+    full_sum = tokens.pure_input + tokens.cache_read + tokens.cache_write
+    pure_only = tokens.pure_input
+
+    if reported_total_input == 0 and full_sum == 0:
         return True, "both zero"
     if reported_total_input == 0:
-        return False, f"reported_total_input=0 but parts sum to {parts}"
-    drift = abs(parts - reported_total_input) / reported_total_input
-    if drift > tolerance:
+        return False, f"reported_total_input=0 but parts sum to {full_sum}"
+
+    drift_full = abs(full_sum - reported_total_input) / reported_total_input
+    drift_pure = abs(pure_only - reported_total_input) / reported_total_input
+    best_drift = min(drift_full, drift_pure)
+
+    if best_drift > tolerance:
         return False, (
-            f"token parts {parts} vs reported {reported_total_input} "
-            f"(drift {drift:.2%}, tolerance {tolerance:.1%})"
+            f"token parts {full_sum} (anthropic-style) / {pure_only} (runtime-style) "
+            f"vs reported {reported_total_input} "
+            f"(best drift {best_drift:.2%}, tolerance {tolerance:.1%})"
         )
-    return True, f"within {drift:.2%}"
+    convention = "anthropic-style" if drift_full <= drift_pure else "runtime-style"
+    return True, f"within {best_drift:.2%} ({convention})"
