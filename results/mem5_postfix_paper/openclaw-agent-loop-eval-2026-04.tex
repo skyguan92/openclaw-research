@@ -1,0 +1,224 @@
+% arXiv preprint template (Chinese, ctex).
+% Build: xelatex paper.tex (再跑两遍以解析交叉引用)
+% 参考: Kasper Green Larsen 的 arxiv-style.sty 精神，但改成自包含的 article + ctex
+\documentclass[11pt,a4paper]{article}
+
+% ---------------- 字体与中文 ----------------
+\usepackage[UTF8,heading=true,scheme=plain]{ctex}
+\setmainfont{Times New Roman}
+\setCJKmainfont[AutoFakeBold=2]{Songti SC}
+\setCJKsansfont{Heiti SC}
+\setmonofont{Menlo}
+
+% ---------------- 版面 ----------------
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\setstretch{1.15}
+\usepackage{indentfirst}
+
+% ---------------- 常用包 ----------------
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{siunitx}
+\sisetup{group-separator = {,}, group-minimum-digits = 4}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage[colorlinks=true, linkcolor=blue!50!black, citecolor=blue!50!black,
+            urlcolor=blue!50!black]{hyperref}
+\usepackage{url}
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  xleftmargin=2em,
+  framexleftmargin=2em,
+}
+\usepackage{caption}
+\captionsetup[table]{skip=4pt}
+\captionsetup[figure]{skip=4pt}
+
+% ---------------- 首页标题 ----------------
+\title{\textbf{Kimi-K2 后端下三款编码 Agent 的忠实复评：\\SSE 解析错误修复后的画像翻转}}
+\author{
+  关嘉伟\thanks{通讯: \texttt{j.guan.sense@gmail.com}} \\
+  OpenClaw Research \\
+}
+\date{2026年4月}
+
+% ---------------- 定理环境 ----------------
+\newtheorem{observation}{观察}
+
+% ---------------- 正文 ----------------
+\begin{document}
+\maketitle
+
+% ======================= Abstract =======================
+\begin{abstract}
+我们在 Kimi-K2 统一后端下复评了三款开源编码 Agent（\texttt{openclaw}、\texttt{hermes}、\texttt{claude-code}）的 token 行为。起因很无趣：之前 \texttt{mem5\_full\_v2} 报告所用的 SSE 解析器对 \texttt{data:} 行的空格太敏感，Kimi 有时不带空格，结果 \texttt{claude-code} 的 \texttt{pure\_input} 被解析成近零、cache 命中率冲到 99\%，让人误以为它和 \texttt{hermes} 是两种完全不同的 profile。修掉解析器、再在 SWE-bench Verified 的三道非饱和任务（\texttt{astropy-12907}、\texttt{django-11138}、\texttt{django-13212}）上重跑以后，那种反差就没了：两个走 Anthropic 协议的 Agent 在 \texttt{cache\_read} 占比（97.1\% vs 97.2\%）、\texttt{pure\_input}（80k vs 84k）和工具调用数上几乎是同一张画像。\texttt{openclaw} 只完成了 2/6，其余 4 次要么死循环打满 30 分钟、要么发了一次工具调用就提前退出。顺带也修了一个 adapter 会话元数据回退 bug——它会让静默退出那轮"继承"上一轮的累计 token——并对受影响的 6 条历史记录做了标注。真正拉开 Agent 差距的不是 cache 策略，是 agent-loop 本身的稳定性。
+\end{abstract}
+
+\vspace{0.5em}
+\textbf{关键词：} 编码 Agent、SWE-bench、Kimi、Cache 计价、SSE 流解析、忠实遥测
+
+% ======================= 1. Introduction =======================
+\section{引言}
+\label{sec:intro}
+
+在一个统一的 LLM 后端下横向对比多款 Agent，最容易踩的坑是"对比的不是 Agent 本身，而是数据采集管线的 bug"。我们此前发表的 \texttt{mem5\_full\_v2} 报告中给出过一个看起来很干净的三分形态：\texttt{openclaw} 几乎不使用 cache，\texttt{hermes} 的 cache 约占输入的 95\%，而 \texttt{claude-code} 的 \texttt{pure\_input}"塌到零"、cache 占比逼近 100\%。这个反差当时被我们归因为三款 Agent 的上下文复用策略差异。
+
+事后我们在一次 smoke test 里发现，\texttt{claude-code} 所依赖的 OpenAI→Anthropic shim 层在解析 Kimi 的 SSE 流时对 \texttt{data:} 行的空格要求不符合 WHATWG 规范：Kimi 返回的 \texttt{data:} 后面有时不带空格，\texttt{slice(6)} 会把第一个字节（往往是 JSON 的 \texttt{\{}）截掉，整个 assistant turn 就会被判无内容。shim 层原本会把这种情况当成"上游啥也没给"，于是返回的 \texttt{modelUsage} 字段里的 \texttt{inputTokens} 只剩 \texttt{cacheReadInputTokens}，\texttt{pure\_input}（按 \texttt{input - cache\_read - cache\_write} 计算）自然就是 0。
+
+\textbf{所谓"三分天下"其实是解析器 bug 的影子}。修复该 bug（Kimi 的 \texttt{data:} 无空格路径改走 \texttt{slice(5).trimStart()}）之后，我们在比 \texttt{astropy-12907} 更难的两道 django 任务上重跑了 3 款 Agent × 5 轮 × 3 任务。这篇报告就是那次复跑的结果。
+
+这次复跑主要做了三件事。首先是把原报告里"\texttt{claude-code} 独立形态"的结论明确撤回——SSE 修复以后，\texttt{claude-code} 和 \texttt{hermes} 的 cache 画像都落在 97.1\% 量级上，肉眼基本看不出区别。然后是把 benchmark 从饱和的 \texttt{astropy-12907}（三家都 100\%）换到两道 django hard，三家通过率这才第一次分开（6/6 vs 6/6 vs 2/6）。最后顺手修了一个数据完整性 bug：\texttt{openclaw} 的 adapter 在当前轮没新会话事件时，会把 \texttt{after\_session["meta"]} 的\emph{累计}计数当成本轮的 token 用量；修复已经回填到历史数据。
+
+% ======================= 2. Background & Setup =======================
+\section{背景与实验配置}
+
+\subsection{统一后端}
+三款 Agent 都通过其 CLI 路由到 Kimi 的 \texttt{kimi-for-coding} 模型：\texttt{openclaw} 原生支持 Kimi provider，\texttt{hermes} 走 \texttt{custom:kimi} 配置，\texttt{claude-code} 经由 \texttt{openclaude} 的 OpenAI→Anthropic shim。我们不修改 Agent 的系统提示或工具集，只统一后端。
+
+\subsection{数据集选择}
+我们从 SWE-bench Verified 里选了三道实例：
+\begin{itemize}
+  \item \texttt{astropy\_\_astropy-12907}：原 \texttt{mem5\_full\_v2} 的 pilot 题，三家都 100\% 通过，用作"饱和参考"。
+  \item \texttt{django\_\_django-11138}：difficulty = \texttt{15 min - 1 hour}，用作第一道区分题。
+  \item \texttt{django\_\_django-13212}：difficulty = \texttt{1-4 hours}，用作第二道区分题。
+\end{itemize}
+
+两道 django 难题按 SWE-bench 的人类难度标注筛选。这是我们这次从饱和 benchmark 逃出来的关键选择。
+
+\subsection{Memory-enabled 多轮协议}
+沿用 \texttt{mem5\_full\_v2} 的 memory-enabled profile：第 1 轮前清空 runtime state，第 2–5 轮复用前一轮的 state 目录。每个 Agent × 每道题 = 5 轮，总计 3 × 3 × 5 = 45 次调用。
+
+\subsection{Quota 截断与"完整窗口"}
+本次实验的 Kimi 配额在 r03 之后逐步耗尽，表现为：\texttt{claude-code} 从 r03 开始 HTTP 403，\texttt{hermes} 从 r04 开始失败。\textbf{能够对三家做无偏对比的完整窗口只有 r01+r02}，也即 3 任务 × 2 轮 × 3 Agent = 18 次有效调用。后文所有"干净对比"的结论都仅使用这 18 次数据。
+
+% ======================= 3. Data Integrity Fix =======================
+\section{数据完整性修复}
+
+\subsection{SSE 解析 bug（\texttt{openclaude}）}
+\texttt{openclaude} 的 OpenAI shim 里负责把 OpenAI-style SSE 转译成 Anthropic-style content blocks 的代码，按 \texttt{data:\_} 六字节前缀切。WHATWG SSE 规范允许 \texttt{data:} 后面不带空格。Kimi 的 \texttt{/chat/completions} 流实际上大多数时候会加空格，但在某些模型（包括 \texttt{kimi-for-coding}）和某些 chunk 边界上会省略。当第一个非空 data 行没有空格时，\texttt{slice(6)} 会吃掉首个 JSON 字符，chunk 被当成解析失败丢弃。
+
+修复落在 \texttt{openclaude} 的 \texttt{src/services/api/openaiShim.ts}：探测到 \texttt{data:} 前缀后，用 \texttt{slice(5).trimStart()} 而不是硬 \texttt{slice(6)}。修复后在 Kimi \texttt{coding} 端点上 cache\_read 恢复到 3.4M 量级（之前的 bug 下 cache\_read 仍然被记录，因为它来自 \texttt{modelUsage} 汇总字段，不走 SSE 解析路径）。
+
+\subsection{静默退出继承累计 token（\texttt{openclaw}）}
+我们的 adapter 用三层回退从 openclaw 的 CLI 读取每次调用的 token 用量：(1) 本轮追加的 session 事件里的 assistant \texttt{usage}、(2) 本次 CLI 输出的 payload.agentMeta.lastCallUsage、(3) \texttt{after\_session["meta"]} 里的 \texttt{inputTokens}/\texttt{outputTokens}。第 (3) 层本意是对"CLI 输出了但 session 文件没写完"的边界情况兜底，但它实际是\emph{会话终身累计}计数。
+
+当某一轮 CLI 静默秒退（下文 \S\ref{sec:openclaw-fail} 会讨论的 openclaw 失败模式之一），前两层都是零，第三层就把上一轮的累计数字写进当前轮的记录。表现为 r04 和 r05 的 \texttt{tokens\_in} 会"刚好等于" r03 的真实值，哪怕 r04 只跑了 15 秒、工具调用数是 0。
+
+我们加了一道 \texttt{has\_new\_activity} 门——只要本轮没观察到任何新活动，就不再回退到累计 meta，而是以零值记录并把 \texttt{error} 字段置为 \texttt{silent\_exit\_no\_api\_activity}。同时对已生成的 6 条被污染记录做了回填：零化当前计数，把原值存到 \texttt{usage\_details.inherited\_cumulative}，标明 backfilled。
+
+这个修复不是 Agent 本身的行为更改，只是让遥测更忠实。openclaw 自己"秒退"这件事是它当前 memory-enabled 模式下的真实表现，我们不去掩盖它。
+
+% ======================= 4. Results =======================
+\section{结果}
+
+\subsection{Cache 画像收敛}
+表~\ref{tab:cache-profile} 是 r01+r02 所有成功 run 的平均画像。\texttt{hermes} 和 \texttt{claude-code} 在 \texttt{cache\_read} 占比、\texttt{pure\_input}、工具调用数这三个关键指标上几乎完全对齐，两者的差异在 token 量级上小于单轮波动。
+
+\begin{table}[h]
+\centering
+\caption{r01+r02 成功 run 的 token 与工具画像（平均值）。\texttt{pure\_input} 单位 token，\texttt{cache\_read} 和 \texttt{total} 单位 M-token。}
+\label{tab:cache-profile}
+\begin{tabular}{lcccccc}
+\toprule
+Agent & n & \texttt{pure\_input} & \texttt{cache\_read} & \texttt{total} & cache\% & tools \\
+\midrule
+\texttt{hermes}      & 6 & 80{,}196 & 3.23 M & 3.33 M & \textbf{97.1\%} & 66 \\
+\texttt{claude-code} & 6 & 84{,}259 & 3.76 M & 3.87 M & \textbf{97.2\%} & 75 \\
+\texttt{openclaw}    & 2 & 141{,}632 & 2.06 M & 2.22 M & 92.7\% & 37 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+与原 \texttt{mem5\_full\_v2} 报告相比：原文给出的 \texttt{claude-code}"\texttt{pure\_input}=0 / cache\%=99.1" 彻底消失，取而代之的是与 \texttt{hermes} 几乎平行的 97.2\% / 84k。解析 bug 修复后这个结果是稳定重现的（我们在独立的 smoke test 上验证过，见 \S\ref{sec:intro}）。
+
+\begin{observation}
+在同一 LLM 后端（Kimi）、同一 Anthropic-messages API 协议下，\texttt{hermes} 与 \texttt{claude-code} 的 cache 利用策略本质上来自上游 SDK 的缓存协商行为，而不是 Agent 框架的独立设计选择。
+\end{observation}
+
+\subsection{任务通过率：一次有意义的分化}
+\label{sec:pass-rate}
+表~\ref{tab:pass-rate} 是 r01+r02 窗口内三家的任务通过情况。
+
+\begin{table}[h]
+\centering
+\caption{r01+r02 任务通过率矩阵。括号内为失败模式简述。}
+\label{tab:pass-rate}
+\begin{tabular}{lccc}
+\toprule
+Agent & astropy-12907 & django-11138 & django-13212 \\
+\midrule
+\texttt{hermes}      & 2/2 & 2/2 & 2/2 \\
+\texttt{claude-code} & 2/2 & 2/2 & 2/2 \\
+\texttt{openclaw}    & 0/2 (timeout, 30 min) & 1/2 & 1/2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\texttt{hermes} 与 \texttt{claude-code} 两家都在 6/6 上顶格。\texttt{openclaw} 2/6 = 33\%。原 \texttt{mem5\_full\_v2} 的 benchmark（只含 astropy-12907）在三家都 100\% 上饱和，无法暴露这种差距；换上两道 django hard 之后，三款 Agent 的能力差才第一次被采样到。
+
+\subsection{效率：hermes 略胜}
+限制在 6/6 都通过的两个 Agent 之间看效率：\texttt{hermes} 的平均延迟 470s 比 \texttt{claude-code} 的 596s 低 21\%，总 token 消耗 3.33M 比 3.87M 低 14\%，工具调用 66 比 75 少 12\%。差距不大但方向一致，在我们这 6 个成功运行上都成立。
+
+\subsection{openclaw 的两种失败模式}
+\label{sec:openclaw-fail}
+\texttt{openclaw} 的 4 次失败不是同一种：
+
+\textbf{死循环型}。\texttt{astropy-12907} 的 r01/r02 均打满 30 分钟 timeout，分别做了 433 和 448 次工具调用。人工抽查 session 文件可见 Agent 在反复 read/grep 同一组文件而不做 write。
+
+\textbf{过早放弃型}。\texttt{django-13212} 的 r02 只发了 1 次工具调用，554 秒空转后无 patch 退出。session 事件里第一次工具调用之后 Agent 立刻发了一个空 assistant turn 结束会话。
+
+这两种模式都不是 token 预算问题——前者超时而非超 token，后者主动结束得太早。我们倾向把这归为 agent loop 控制逻辑对难题的鲁棒性不够，而不是 LLM 后端差异。
+
+% ======================= 5. Discussion =======================
+\section{讨论}
+
+\subsection{对原报告结论的回撤}
+原报告基于"三分形态"提出的几个衍生结论——比如"\texttt{claude-code} 通过激进 cache 获得了最低的 cost\_tokens"——在这次修复后的数据下不成立。三款 Agent 里 \texttt{openclaw} 的 cache\% 仍然略低（92.7\%），但差距只有 4--5 个百分点，且样本量（n=2 成功 run）不足以支撑窄置信区间。我们撤回原报告第 3、4 节的排序结论。
+
+\subsection{忠实遥测作为方法论要求}
+两个 bug——上游 shim 的 SSE 解析、我们自己 adapter 的累计 meta 回退——都不会让脚本崩溃，只是悄悄污染数字。它们能被注意到纯粹是因为数字"看起来太整齐"了：\texttt{pure\_input}=0，r04/r05 的 token 数刚好等于 r03。靠这种巧合发现 bug 并不牢靠。与其依赖运气，不如让遥测本身提供检查点：每轮记一次 \texttt{final\_call\_input\_tokens}（这次调用的 usage，不是累计）；加一个显式的 \texttt{has\_new\_activity} 布尔字段把"本轮真干活"和"本轮复用了之前的状态但没产生新活动"分开；agent 异常退出（静默、panic、超时）写明确的错误码，而不是默认写入 \texttt{error=null}。这三样不用多花什么成本，但能省掉下一次"数字太整齐"才回头查的时间。
+
+\subsection{局限}
+这次实验的主要局限是样本量。受 Kimi 配额约束，可用来横向对比的完整窗口只有 r01+r02（每 Agent 6 次成功调用）。结论在这 6 次上稳定，但我们没有 bootstrap 置信区间。下一步我们会在配额恢复后扩到完整 5 轮并加 instance 数到 15-20 道。
+
+% ======================= 6. Conclusion =======================
+\section{结论}
+数据采集管线自己有 bug 的时候，Agent 之间看起来的"显著差异"常常只是管线的差异。把解析 bug 和遥测 bug 都修掉之后，两款走 Anthropic 协议的 Agent 在 Kimi 后端上的 cache 画像几乎重合；真正把三款 Agent 分开的，是 \texttt{openclaw} 在硬任务上 agent-loop 的稳定性——33\% 的通过率，加上两种可重现的失败模式（死循环和过早放弃）。我们从这次经验里抽出的三点想法，更像是对下一轮基准实验的自我提醒：挑几道难度没饱和的任务做起点，通过率之外顺便把失败模式分布也报出来；发表之前最好对遥测链路做一次"数字看起来是不是太整齐了"的复盘。
+
+% ======================= References =======================
+\section*{致谢}
+感谢 Moonshot 提供 Kimi \texttt{kimi-for-coding} 端点。感谢 \texttt{openclaude}、\texttt{hermes}、\texttt{openclaw} 三个项目的维护者。本实验由 GB10 集群完成。
+
+\begin{thebibliography}{9}
+\bibitem{swebench}
+Jimenez, C. E., Yang, J., Wettig, A., Yao, S., Pei, K., Press, O., \& Narasimhan, K.
+\textit{SWE-bench: Can Language Models Resolve Real-World GitHub Issues?}
+ICLR 2024.
+
+\bibitem{mem5v2}
+关嘉伟.
+\textit{mem5\_full\_v2: Memory-Enabled Runtime Profile 下三款 Agent 的 Token 行为对比}.
+OpenClaw Research Technical Report, 2026年4月.
+
+\bibitem{sse-spec}
+WHATWG.
+\textit{HTML Living Standard §9.2 Server-sent events}.
+\url{https://html.spec.whatwg.org/multipage/server-sent-events.html}
+
+\bibitem{kimi}
+Moonshot AI.
+\textit{Kimi K2 API Reference — \texttt{kimi-for-coding} model}.
+\url{https://platform.moonshot.cn/}
+
+\end{thebibliography}
+
+\end{document}
